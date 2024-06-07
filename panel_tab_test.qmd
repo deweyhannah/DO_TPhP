@@ -1,0 +1,36 @@
+---
+title: "tab testing"
+format: html
+---
+```{r setup}
+#| message: false
+#| warning: false
+
+library(tidyverse)
+```
+::: {.panel-tabset .nav-pills}
+
+## A section
+
+::: {.panel-tabset .nav-pills}
+
+```{r panel test}
+#| results: asis
+#| warning: false
+for(species in unique(iris$Species)){
+  a <- iris %>% dplyr::filter(Species == species) %>% 
+    ggplot(aes(x = Sepal.Length, y = Sepal.Width)) +
+    geom_point() +
+    ggtitle(species) +
+    theme_light()
+  
+  cat("\n###", species, "\n")
+  print(a)
+  cat("\n\n")
+}
+
+```
+
+:::
+
+:::

@@ -1,0 +1,238 @@
+---
+title: "GBRS_DESeq"
+author: "Hannah Dewey"
+date: "`r Sys.Date()`"
+format: 
+  html:
+    self-contained: true
+    embed-resources: true
+code-fold: true
+toc: true
+---
+
+```{r setup}
+#| warning: false
+#| message: false
+
+## Set up environment for this project
+
+library(DESeq2)
+library(tidyverse)
+library(GGally)
+library(reshape2)
+library(DT)
+library(plotly)
+library(gprofiler2)
+set_base_url("https://biit.cs.ut.ee/gprofiler_archive3/e105_eg52_p16/")
+
+create_dt <- function(x){
+  DT::datatable(x,
+                extensions = 'Buttons',
+                rownames = FALSE, 
+                filter="top",
+                options = list(dom = 'Blfrtip',
+                               buttons = c('copy', 'csv', 'excel'),
+                               pageLength = 5, 
+                               scrollX= TRUE
+                               ))
+  
+}
+
+```
+
+## Run GBRS on DO Samples only
+
+-   submission file: `/projects/munger-lab/projects/DO_TPhP/scripts/DO_TPhP_gbrs_submit.sh`
+-   sample file: `/projects/munger-lab/projects/DO_TPhP/data/TPhP_DO_gbrs_samples.csv`
+-   GBRS outputs: `/projects/munger-lab/projects/DO_TPhP/GBRS/`
+
+## Set up GBRS count table for use with DESeq
+
+Assemble the expected counts from the GBRS alignment into a count table to be used as input for DESeq
+
+```{r make_counts_gbrs}
+#| cache: false
+#| message: false
+
+sample_list <- read.csv("/projects/munger-lab/projects/DO_TPhP/data/TPhP_DO_gbrs_samples.csv", header = T, stringsAsFactors = F)
+
+gbrs_counts <- data.frame()
+for(samp in unique(sample_list$sampleID)){
+  tmp <- read.delim(paste0("/projects/munger-lab/projects/DO_TPhP/GBRS/",samp,"/gbrs/",samp,".diploid.genes.expected_read_counts"), header=T, stringsAsFactors = F)[,c(1,10)]
+  colnames(tmp) <- c("gene_id",samp)
+  if(samp == unique(sample_list$sampleID)[1]){
+    gbrs_counts <- tmp
+  }
+  else{
+    gbrs_counts <- merge(gbrs_counts, tmp, by="gene_id", all=T)
+  }
+}
+
+## Add in EMASE counts from F1s
+emase_samps <- read.csv("/projects/munger-lab/projects/DO_TPhP/data/TPhP_F1_gbrs_samples.csv", header=T, stringsAsFactors = F)
+
+for(samp in unique(emase_samps$sampleID[which(emase_samps$generation==1)])){
+  tmp <- read.delim(paste0("/projects/munger-lab/projects/DO_TPhP/emase/",samp,"/emase/",samp,".multiway.genes.expected_read_counts"), header=T, stringsAsFactors = F)[,c(1,4)]
+  colnames(tmp) <- c("gene_id",samp)
+  gbrs_counts <- merge(gbrs_counts, tmp, by="gene_id", all.x=T)
+}
+
+
+rownames(gbrs_counts) <- gbrs_counts$gene_id
+gbrs_counts <- gbrs_counts[,-1]
+
+#write.table(gbrs_counts, "/projects/munger-lab/projects/DO_TPhP/data/gbrs_counts.txt", quote=F, sep="\t")
+```
+
+```{r load files}
+## Files to be used in this analysis
+
+#gbrs_counts <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/gbrs_counts.txt", row.names = 1, header = T, stringsAsFactors = F)
+sample_list <- read.csv("/projects/munger-lab/projects/DO_TPhP/data/TPhP_DO_gbrs_samples.csv", header = T, stringsAsFactors = F)
+sample_meta <- read.csv("/projects/munger-lab/projects/DO_TPhP/data/TPhPpath2fastqs.csv", header=T, stringsAsFactors = F)
+
+biomart_105 <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/biomart_v105.txt", stringsAsFactors = F)
+
+message(table(is.na(gbrs_counts)))
+
+```
+
+## Run DESeq on GBRS counts
+
+```{r run_deseq_gbrs}
+#| cache: false
+#| message: false
+
+sample_split <- colsplit(colnames(gbrs_counts),"_",c("tissue","mouse_number"))
+
+# sample_table <- data.frame()
+sample_table<- as.data.frame(colnames(gbrs_counts))
+colnames(sample_table) <- "ID"
+sample_table$tissue <- "kidney"
+sample_table$tissue[which(sample_split$tissue=="Lv")] <- "liver"
+sample_table$mouse <- sample_split$mouse_number
+
+sample_table<- merge(sample_table, sample_meta[,c("Mouse..", "Sex","Strain", "Dose..mg.kg.","batch_number")], by.x="mouse", by.y="Mouse..", all.x = T)
+colnames(sample_table) <- c("mouse","ID","tissue","sex","strain","dose","batch")
+
+sample_table <- sample_table[,c("ID","mouse","sex","strain","dose","batch","tissue")]
+rownames(sample_table) <- sample_table$ID
+
+#all(rownames(sample_table)==colnames(gbrs_counts))
+
+gbrs_counts <- gbrs_counts[,rownames(sample_table)]
+gbrs_counts_round <- round(gbrs_counts)
+```
+
+```{r check_counts}
+table(is.na(gbrs_counts_round))
+```
+
+```{r run_DESeq}
+
+sample_table$strain <- as.factor(sample_table$strain)
+sample_table$sex <- as.factor(sample_table$sex)
+sample_table$dose <- as.factor(sample_table$dose)
+sample_table$batch <- as.factor(sample_table$batch)
+sample_table$tissue <- as.factor(sample_table$tissue)
+
+if(any(is.na(gbrs_counts_round))){
+  message("NAs found in gbrs round counts")
+  stop()
+}
+
+dds <- DESeqDataSetFromMatrix(countData = gbrs_counts_round, colData = sample_table,
+                              design = ~ sex + strain + dose + batch + tissue)
+
+dds <- DESeq(dds)
+
+```
+
+## Start looking at PCA
+
+```{r pca_setup}
+
+gbrs_norm_counts <- counts(dds, normalized=T)
+
+colnames(biomart_105) <- c("id","id.version","gene.start","gene.end","gene.type","chromosome","symbol")
+
+pca_gbrs <- prcomp(t(log1p(gbrs_norm_counts[,sample_table$ID, drop=F])), center=T, scale=F)
+pca_gbrs_df <- as_tibble(pca_gbrs$x, rownames="ID") %>%
+  left_join(sample_table)
+var_gbrs_explained <- (pca_gbrs$sdev^2/sum(pca_gbrs$sdev^2))
+
+```
+
+##Principal Component Comparison
+
+```{r pc_comp}
+#| cache: false
+#| message: false
+
+## Dose
+# pca$x %>% as_tibble(rownames = "ID") %>%
+#   left_join(sample_table) %>%
+pca_gbrs_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=dose),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  theme(legend.position = "right")
+
+## Sex
+# pca$x %>% as_tibble(rownames = "ID") %>%
+#   left_join(sample_table) %>%
+pca_gbrs_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=sex),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  #scale_color_manual(values = strain_colors) +
+  #scale_fill_manual(values = strain_colors) +
+  theme(legend.position = "right")
+
+## Batch
+# pca$x %>% as_tibble(rownames = "ID") %>%
+#   left_join(sample_table) %>%
+pca_gbrs_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=batch),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  #scale_color_manual(values = strain_colors) +
+  #scale_fill_manual(values = strain_colors) +
+  theme(legend.position = "right")
+
+## Tissue
+# pca$x %>% as_tibble(rownames = "ID") %>%
+#   left_join(sample_table) %>%
+pca_gbrs_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=tissue),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  #scale_color_manual(values = strain_colors) +
+  #scale_fill_manual(values = strain_colors) +
+  theme(legend.position = "right")
+
+## Strain
+# pca$x %>% as_tibble(rownames = "ID") %>%
+#   left_join(sample_table) %>%
+pca_gbrs_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=strain),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  #scale_color_manual(values = strain_colors) +
+  #scale_fill_manual(values = strain_colors) +
+  theme(legend.position = "right")
+
+tibble(var = var_gbrs_explained[1:10]*100, PC = paste0("PC", seq(1:10))) %>%
+  arrange(desc(var)) %>%
+  mutate(label = factor(PC, levels = PC)) %>%
+  ggplot(aes(x = label, y = var)) +
+  geom_col() +
+  xlab("Principal Component") +
+  ylab("% Variation Explained") +
+  theme_light(base_size = 14)
+```

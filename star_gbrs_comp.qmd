@@ -1,0 +1,440 @@
+---
+title: "Alignment Comp"
+author: "Hannah Dewey"
+date: "`r Sys.Date()`"
+format: 
+  html:
+    self-contained: true
+    embed-resources: true
+code-fold: true
+toc: true
+---
+
+```{r setup}
+#| warning: false
+#| message: false
+
+## Set up environment for this project
+
+library(tidyverse)
+library(reshape2)
+library(GGally)
+library(DT)
+library(rstatix)
+library(Hmisc)
+
+create_dt <- function(x){
+  DT::datatable(x,
+                extensions = 'Buttons',
+                rownames = FALSE, 
+                filter="top",
+                options = list(dom = 'Blfrtip',
+                               buttons = c('copy', 'csv', 'excel'),
+                               pageLength = 5, 
+                               scrollX= TRUE
+                               ))
+  
+}
+
+```
+
+```{r load_files}
+# star_counts <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/star_counts.txt", row.names = 1, stringsAsFactors = F)
+# star_counts_filt <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/star_filtered_counts.txt", row.names = 1, stringsAsFactors = F)
+# 
+# gbrs_counts <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/gbrs_counts.txt", row.names = 1, stringsAsFactors = F)
+# gbrs_counts_filt <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/gbrs_filtered_counts.txt", row.names = 1, stringsAsFactors = F)
+
+gbrs_kd_all_filt <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/gbrs_filtered_kidney_all_counts.txt", row.names = 1, stringsAsFactors = F)
+gbrs_lv_all_filt <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/gbrs_filtered_liver_all_counts.txt", row.names = 1, stringsAsFactors = F)
+star_kd_all_filt <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/star_filtered_kidney_all_counts.txt", row.names = 1, stringsAsFactors = F)
+star_lv_all_filt <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/star_filtered_liver_all_counts.txt", row.names = 1, stringsAsFactors = F)
+
+
+rownames(star_lv_all_filt) <- gsub('_.*','',rownames(star_lv_all_filt))
+rownames(star_kd_all_filt) <- gsub('_.*','',rownames(star_kd_all_filt))
+
+colnames(star_kd_all_filt) <- paste0(colnames(star_kd_all_filt), "_star")
+colnames(gbrs_kd_all_filt) <- paste0(colnames(gbrs_kd_all_filt), "_gbrs")
+colnames(star_lv_all_filt) <- paste0(colnames(star_lv_all_filt), "_star")
+colnames(gbrs_lv_all_filt) <- paste0(colnames(gbrs_lv_all_filt), "_gbrs")
+
+sample_meta <- read.csv("/projects/munger-lab/projects/DO_TPhP/data/TPhPpath2fastqs.csv", header=T, stringsAsFactors = F)
+sample_meta_use <- sample_meta[,c("Mouse..", "Sex", "Strain", "Dose..mg.kg.")]
+colnames(sample_meta_use) <- c("mouse","sex","strain","dose")
+
+star_comb_filt <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/star_filtered_combined_counts.txt", row.names = 1, stringsAsFactors = F)
+gbrs_comb_filt <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/gbrs_filtered_combined_counts.txt", row.names = 1, stringsAsFactors = F)
+
+rownames(star_comb_filt) <- gsub('_.*','',rownames(star_comb_filt))
+colnames(star_comb_filt) <- paste0(colnames(star_comb_filt), "_star")
+colnames(gbrs_comb_filt) <- paste0(colnames(gbrs_comb_filt), "_gbrs")
+
+star_either_filt <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/star_filtered_either_counts.txt", row.names = 1, stringsAsFactors = F)
+gbrs_either_filt <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/gbrs_filtered_either_counts.txt", row.names = 1, stringsAsFactors = F)
+
+rownames(star_either_filt) <- gsub('_.*','',rownames(star_either_filt))
+colnames(star_either_filt) <- paste0(colnames(star_either_filt), "_star")
+colnames(gbrs_either_filt) <- paste0(colnames(gbrs_either_filt), "_gbrs")
+
+```
+
+Check intersection between GBRS alignment and STAR alingment
+```{r check_intersect}
+`%notin%` <- Negate(`%in%`)
+
+gbrs_not_star_kd <- rownames(gbrs_kd_all_filt)[rownames(gbrs_kd_all_filt) %notin% rownames(star_kd_all_filt)] 
+star_not_gbrs_kd <- rownames(star_kd_all_filt)[rownames(star_kd_all_filt) %notin% rownames(gbrs_kd_all_filt)] 
+star_and_gbrs_kd <- intersect(rownames(star_kd_all_filt), rownames(gbrs_kd_all_filt))
+
+gbrs_not_star_lv <- rownames(gbrs_lv_all_filt)[rownames(gbrs_lv_all_filt) %notin% rownames(star_lv_all_filt)] 
+star_not_gbrs_lv <- rownames(star_lv_all_filt)[rownames(star_lv_all_filt) %notin% rownames(gbrs_lv_all_filt)] 
+star_and_gbrs_lv <- intersect(rownames(star_lv_all_filt), rownames(gbrs_lv_all_filt))
+
+gbrs_not_star_comb <- rownames(gbrs_comb_filt)[rownames(gbrs_comb_filt) %notin% rownames(star_comb_filt)] 
+star_not_gbrs_comb <- rownames(star_comb_filt)[rownames(star_comb_filt) %notin% rownames(gbrs_comb_filt)] 
+star_and_gbrs_comb <- intersect(rownames(star_comb_filt), rownames(gbrs_comb_filt))
+
+gbrs_not_star_either <- rownames(gbrs_either_filt)[rownames(gbrs_either_filt) %notin% rownames(star_either_filt)] 
+star_not_gbrs_either <- rownames(star_either_filt)[rownames(star_either_filt) %notin% rownames(gbrs_either_filt)] 
+star_and_gbrs_either <- intersect(rownames(star_either_filt), rownames(gbrs_either_filt))
+
+# message(paste0("kidney overlap: ",length(intersect(rownames(star_kd_all_filt), rownames(gbrs_kd_all_filt)))))
+# # length(intersect(rownames(star_kd_all_filt), rownames(gbrs_kd_all_filt))) ## [1] 14062
+# message(paste0("liver overlap: ", length(intersect(rownames(star_lv_all_filt), rownames(gbrs_lv_all_filt)))))
+# # length(intersect(rownames(star_lv_all_filt), rownames(gbrs_lv_all_filt))) ## [1] 12162
+# message(paste0("liver: gbrs ", nrow(gbrs_lv_all_filt),"\t star ",nrow(star_lv_all_filt)))
+# # nrow(gbrs_lv_all_filt) ## [1] 12735
+# # nrow(star_lv_all_filt) ## [1] 13050
+# message(paste0("kidney: gbrs", nrow(gbrs_kd_all_filt),"\t star ",nrow(star_kd_all_filt)))
+# # nrow(gbrs_kd_all_filt) ## [1] 14971
+# # nrow(star_kd_all_filt) ## [1] 15245
+# 
+# message(paste0("kidney unique: gbrs ",length(gbrs_not_star_kd),"\t star",length(star_not_gbrs_kd)))
+# # length(gbrs_not_star_kd) ## [1] 909
+# # length(star_not_gbrs_kd) ## [1] 1183
+# 
+# message(paste0("liver unique: gbrs ",length(gbrs_not_star_lv),"\t star ",length(star_not_gbrs_lv)))
+# # length(gbrs_not_star_lv) ## [1] 573
+# # length(star_not_gbrs_lv) ## [1] 888
+# 
+# message(paste0("GBRS unique - liver/kidney overlap ", length(intersect(gbrs_not_star_lv, gbrs_not_star_kd))))
+# # length(intersect(gbrs_not_star_lv, gbrs_not_star_kd))
+# message(paste0("STAR unique - liver/kidney overlap ", length(intersect(star_not_gbrs_kd, star_not_gbrs_lv))))
+# # length(intersect(star_not_gbrs_kd, star_not_gbrs_lv))
+# message(paste0("overlap between STAR/GBRS and liver/kidney ",length(intersect(star_and_gbrs_kd, star_and_gbrs_lv))))
+# # length(intersect(star_and_gbrs_kd, star_and_gbrs_lv))
+```
+
+Overlap for tissue/alignment
+ - STAR/GBRS (kidney):       14062
+ - STAR/GBRS (liver):        12162
+ - STAR (kidney/liver):      736
+ - GBRS (kidney/liver):      282
+ - STAR/GBRS kidney/liver:   11537
+```{r comp_start_basics}
+#| message: false
+#| cache: true
+## mouse - mouse gene comp
+#star_5x5 <- as.matrix(star_counts_filt[1:5,1:5, drop=F])
+# colnames(star_counts_filt) <- paste0(colnames(star_counts_filt), "_star")
+star_kd_filt_mat <- as.matrix(star_kd_all_filt)
+star_lv_filt_mat <- as.matrix(star_lv_all_filt)
+#gbrs_5x5 <- as.matrix(gbrs_counts_filt[1:5,1:5, drop=F])
+# colnames(gbrs_counts_filt) <- paste0(colnames(gbrs_counts_filt), "_gbrs")
+gbrs_kd_filt_mat <- as.matrix(gbrs_kd_all_filt)
+gbrs_lv_filt_mat <- as.matrix(gbrs_lv_all_filt)
+
+star_comb_filt_mat <- as.matrix(star_comb_filt)
+gbrs_comb_filt_mat <- as.matrix(gbrs_comb_filt)
+
+star_either_filt_mat <- as.matrix(star_either_filt)
+gbrs_either_filt_mat <- as.matrix(gbrs_either_filt)
+
+### Setup combined norm counts
+gbrs_tissue_filt_comb <- merge(gbrs_kd_all_filt[which(rownames(gbrs_kd_all_filt) %in% intersect(star_and_gbrs_kd, star_and_gbrs_lv)), grepl("Kd", colnames(gbrs_kd_all_filt))],
+                               gbrs_lv_all_filt[which(rownames(gbrs_lv_all_filt) %in% intersect(star_and_gbrs_kd, star_and_gbrs_lv)), grepl("Lv", colnames(gbrs_lv_all_filt))],
+                               by="row.names", all=T)
+rownames(gbrs_tissue_filt_comb) <- gbrs_tissue_filt_comb$Row.names
+gbrs_tissue_filt_comb <- gbrs_tissue_filt_comb[,-1]
+
+tissue_over_list <- intersect(star_and_gbrs_kd, star_and_gbrs_lv)
+
+star_tissue_filt_comb <- merge(star_kd_all_filt[which(rownames(star_kd_all_filt) %in% intersect(star_and_gbrs_kd, star_and_gbrs_lv)), grepl("Kd", colnames(star_kd_all_filt))],
+                               star_lv_all_filt[which(rownames(star_lv_all_filt) %in% intersect(star_and_gbrs_kd, star_and_gbrs_lv)), grepl("Lv", colnames(star_lv_all_filt))],
+                               by="row.names", all=T)
+rownames(star_tissue_filt_comb) <- star_tissue_filt_comb$Row.names
+star_tissue_filt_comb <- star_tissue_filt_comb[,-1]
+
+## Pearson Correlation between overlapping genes when filtered for either or instead of one tissue or another
+## Raw Counts
+star_gbrs_cor_pear_either <- Hmisc::rcorr(star_either_filt_mat[which(rownames(star_either_filt_mat) %in% star_and_gbrs_either),], 
+                              gbrs_either_filt_mat[which(rownames(gbrs_either_filt_mat) %in% star_and_gbrs_either),], type="pearson")
+
+star_gbrs_cor_pear_either_tib <- as_tibble(star_gbrs_cor_pear_either$r[colnames(star_either_filt_mat), colnames(gbrs_either_filt_mat)],
+                            rownames = "star") %>%
+  pivot_longer( colnames(gbrs_either_filt_mat), names_to = "gbrs", values_to = "cor") %>%
+  mutate( sampleid_star = gsub("_star","",star),
+          sampleid_gbrs = gsub("_gbrs","", gbrs)) %>%
+  filter( sampleid_star == sampleid_gbrs) %>% 
+  mutate( sampleid = sampleid_star) |> 
+  select(sampleid, cor) |> 
+  separate(sampleid, into =c("tissue","num"), remove = F) |> 
+  mutate(num = as.numeric(num)) |> 
+  left_join(sample_meta_use, by = c("num"="mouse")) 
+
+star_gbrs_cor_pear_either_tib |>
+  ggplot() +
+  aes( x = cor, col = strain, fill = strain) +
+  geom_histogram(bins = 150) +
+  facet_wrap(~tissue) +
+  ggtitle("DO expression filtered either liver/kidney set Pearson") +
+  theme_light()
+
+star_gbrs_cor_pear_either_tib |>
+  ggplot() +
+  aes( x = cor, col = as.factor(dose), fill = as.factor(dose)) +
+  geom_histogram(bins = 150) +
+  facet_wrap(~tissue) +
+  ggtitle("DO expression filtered either liver/kidney set Pearson") +
+  theme_light()
+
+star_gbrs_cor_spear_either <- Hmisc::rcorr(star_either_filt_mat[which(rownames(star_either_filt_mat) %in% star_and_gbrs_either),], 
+                              gbrs_either_filt_mat[which(rownames(gbrs_either_filt_mat) %in% star_and_gbrs_either),], type="spearman")
+
+star_gbrs_cor_spear_either_tib <- as_tibble(star_gbrs_cor_spear_either$r[colnames(star_either_filt_mat), colnames(gbrs_either_filt_mat)],
+                            rownames = "star") %>%
+  pivot_longer( colnames(gbrs_either_filt_mat), names_to = "gbrs", values_to = "cor") %>%
+  mutate( sampleid_star = gsub("_star","",star),
+          sampleid_gbrs = gsub("_gbrs","", gbrs)) %>%
+  filter( sampleid_star == sampleid_gbrs) %>% 
+  mutate( sampleid = sampleid_star) |> 
+  select(sampleid, cor) |> 
+  separate(sampleid, into =c("tissue","num"), remove = F) |> 
+  mutate(num = as.numeric(num)) |> 
+  left_join(sample_meta_use, by = c("num"="mouse"))
+
+star_gbrs_cor_spear_either_tib |>
+  ggplot() +
+  aes( x = cor, col = strain, fill = strain) +
+  geom_histogram(bins = 150) +
+  facet_wrap(~tissue) +
+  ggtitle("DO expression filtered either liver/kidney set Spearman") +
+  theme_light()
+
+star_gbrs_cor_spear_either_tib |>
+  ggplot() +
+  aes( x = cor, col = as.factor(dose), fill = as.factor(dose)) +
+  geom_histogram(bins = 150) +
+  facet_wrap(~tissue) +
+  ggtitle("DO expression filtered either liver/kidney set Spearman") +
+  theme_light()
+
+#Hmisc::rcorr(star_5x5, gbrs_5x5, type="pearson")
+## Spearman correlation between all intersecting genes gbrs/star and liver/kidney for liver and then kidney 
+## Normalized Counts
+star_gbrs_cor_spear <- Hmisc::rcorr(as.matrix(star_tissue_filt_comb), 
+                              as.matrix(gbrs_tissue_filt_comb), type="spearman")
+
+star_gbrs_cor_spear_both_tib <- as_tibble(star_gbrs_cor_spear$r[colnames(star_tissue_filt_comb), colnames(gbrs_tissue_filt_comb)],
+                            rownames = "star") %>%
+  pivot_longer( colnames(gbrs_tissue_filt_comb), names_to = "gbrs", values_to = "cor") %>%
+  mutate( sampleid_star = gsub("_star","",star),
+          sampleid_gbrs = gsub("_gbrs","", gbrs)) %>%
+  filter( sampleid_star == sampleid_gbrs) %>% 
+  mutate( sampleid = sampleid_star) |> 
+  select(sampleid, cor) |> 
+  separate(sampleid, into =c("tissue","num"), remove = F) |> 
+  mutate(num = as.numeric(num)) |> 
+  left_join(sample_meta_use, by = c("num"="mouse")) 
+
+star_gbrs_cor_spear_both_tib |>
+  ggplot() +
+  aes( x = cor, col = strain, fill = strain) +
+  geom_histogram(bins = 150) +
+  facet_wrap(~tissue) +
+  ggtitle("DO Expression Filtered, Both Tissues, Spearman") +
+  theme_light()
+
+star_gbrs_cor_spear_both_tib |>
+  ggplot() +
+  aes( x = cor, col = as.factor(dose), fill = as.factor(dose)) +
+  geom_histogram(bins = 150) +
+  facet_wrap(~tissue) +
+  ggtitle("DO Expression Filtered, Both Tissues, Spearman") +
+  theme_light()
+
+## Pearson
+star_gbrs_cor_pear <- Hmisc::rcorr(as.matrix(star_tissue_filt_comb), 
+                              as.matrix(gbrs_tissue_filt_comb), type="pearson")
+
+star_gbrs_cor_pear_both_tib <- as_tibble(star_gbrs_cor_pear$r[colnames(star_tissue_filt_comb), colnames(gbrs_tissue_filt_comb)],
+                            rownames = "star") %>%
+  pivot_longer( colnames(gbrs_tissue_filt_comb), names_to = "gbrs", values_to = "cor") %>%
+  mutate( sampleid_star = gsub("_star","",star),
+          sampleid_gbrs = gsub("_gbrs","", gbrs)) %>%
+  filter( sampleid_star == sampleid_gbrs) %>% 
+  mutate( sampleid = sampleid_star) |> 
+  select(sampleid, cor) |> 
+  separate(sampleid, into =c("tissue","num"), remove = F) |> 
+  mutate(num = as.numeric(num)) |> 
+  left_join(sample_meta_use, by = c("num"="mouse")) 
+
+## Spearman correlation for Kidney filtered gene list
+## Normalized counts
+kidney_only_list <- star_and_gbrs_kd[star_and_gbrs_kd %notin% star_and_gbrs_lv]
+star_gbrs_cor_spear_kd <- Hmisc::rcorr(star_kd_filt_mat[which(rownames(star_kd_filt_mat) %in% kidney_only_list),], 
+                              gbrs_kd_filt_mat[which(rownames(gbrs_kd_filt_mat) %in% kidney_only_list),], type="spearman")
+
+star_gbrs_cor_spear_kd_tib <- as_tibble(star_gbrs_cor_spear_kd$r[colnames(star_kd_filt_mat), colnames(gbrs_kd_filt_mat)],
+                            rownames = "star") %>%
+  pivot_longer( colnames(gbrs_kd_filt_mat), names_to = "gbrs", values_to = "cor") %>%
+  mutate( sampleid_star = gsub("_star","",star),
+          sampleid_gbrs = gsub("_gbrs","", gbrs)) %>%
+  filter( sampleid_star == sampleid_gbrs) %>% 
+  mutate( sampleid = sampleid_star) |> 
+  select(sampleid, cor) |> 
+  separate(sampleid, into =c("tissue","num"), remove = F) |> 
+  mutate(num = as.numeric(num)) |> 
+  left_join(sample_meta_use, by = c("num"="mouse")) 
+
+star_gbrs_cor_spear_kd_tib |>
+  ggplot() +
+  aes( x = cor, col = strain, fill = strain) +
+  geom_histogram(bins = 150) +
+  facet_wrap(~tissue) +
+  ggtitle("DO Expression Filtered, Kidney Only, Spearman") +
+  theme_light()
+
+star_gbrs_cor_spear_kd_tib |>
+  ggplot() +
+  aes( x = cor, col = as.factor(dose), fill = as.factor(dose)) +
+  geom_histogram(bins = 150) +
+  facet_wrap(~tissue) +
+  ggtitle("DO Expression Filtered, Kidney Only, Spearman") +
+  theme_light()
+
+# Pearson
+star_gbrs_cor_pear_kd <- Hmisc::rcorr(star_kd_filt_mat[which(rownames(star_kd_filt_mat) %in% kidney_only_list),], 
+                              gbrs_kd_filt_mat[which(rownames(gbrs_kd_filt_mat) %in% kidney_only_list),], type="pearson")
+
+star_gbrs_cor_pear_kd_tib <- as_tibble(star_gbrs_cor_pear_kd$r[colnames(star_kd_filt_mat), colnames(gbrs_kd_filt_mat)],
+                            rownames = "star") %>%
+  pivot_longer( colnames(gbrs_kd_filt_mat), names_to = "gbrs", values_to = "cor") %>%
+  mutate( sampleid_star = gsub("_star","",star),
+          sampleid_gbrs = gsub("_gbrs","", gbrs)) %>%
+  filter( sampleid_star == sampleid_gbrs) %>% 
+  mutate( sampleid = sampleid_star) |> 
+  select(sampleid, cor) |> 
+  separate(sampleid, into =c("tissue","num"), remove = F) |> 
+  mutate(num = as.numeric(num)) |> 
+  left_join(sample_meta_use, by = c("num"="mouse")) 
+  
+## Spearman correlation for Liver filtered gene list
+## Normalized counts
+liver_only_list <- star_and_gbrs_lv[star_and_gbrs_lv %notin% star_and_gbrs_kd]
+star_gbrs_cor_spear_lv <- Hmisc::rcorr(star_lv_filt_mat[which(rownames(star_lv_filt_mat) %in% liver_only_list),], 
+                              gbrs_lv_filt_mat[which(rownames(gbrs_lv_filt_mat) %in% liver_only_list),], type="spearman")
+
+star_gbrs_cor_spear_lv_tib <- as_tibble(star_gbrs_cor_spear_lv$r[colnames(star_lv_filt_mat), colnames(gbrs_lv_filt_mat)],
+                            rownames = "star") %>%
+  pivot_longer( colnames(gbrs_lv_filt_mat), names_to = "gbrs", values_to = "cor") %>%
+  mutate( sampleid_star = gsub("_star","",star),
+          sampleid_gbrs = gsub("_gbrs","", gbrs)) %>%
+  filter( sampleid_star == sampleid_gbrs) %>% 
+  mutate( sampleid = sampleid_star) |> 
+  select(sampleid, cor) |> 
+  separate(sampleid, into =c("tissue","num"), remove = F) |> 
+  mutate(num = as.numeric(num)) |> 
+  left_join(sample_meta_use, by = c("num"="mouse")) 
+
+star_gbrs_cor_spear_lv_tib |>
+  ggplot() +
+  aes( x = cor, col = strain, fill = strain) +
+  geom_histogram(bins = 150) +
+  facet_wrap(~tissue) +
+  ggtitle("DO Expression Filtered, Liver Only, Spearman") +
+  theme_light()
+
+star_gbrs_cor_spear_lv_tib |>
+  ggplot() +
+  aes( x = cor, col = as.factor(dose), fill = as.factor(dose)) +
+  geom_histogram(bins = 150) +
+  facet_wrap(~tissue) +
+  ggtitle("DO Expression Filtered, Liver Only, Spearman") +
+  theme_light()
+
+#Pearson
+star_gbrs_cor_pear_lv <- Hmisc::rcorr(star_lv_filt_mat[which(rownames(star_lv_filt_mat) %in% liver_only_list),], 
+                              gbrs_lv_filt_mat[which(rownames(gbrs_lv_filt_mat) %in% liver_only_list),], type="pearson")
+
+star_gbrs_cor_pear_lv_tib <- as_tibble(star_gbrs_cor_pear_lv$r[colnames(star_lv_filt_mat), colnames(gbrs_lv_filt_mat)],
+                            rownames = "star") %>%
+  pivot_longer( colnames(gbrs_lv_filt_mat), names_to = "gbrs", values_to = "cor") %>%
+  mutate( sampleid_star = gsub("_star","",star),
+          sampleid_gbrs = gsub("_gbrs","", gbrs)) %>%
+  filter( sampleid_star == sampleid_gbrs) %>% 
+  mutate( sampleid = sampleid_star) |> 
+  select(sampleid, cor) |> 
+  separate(sampleid, into =c("tissue","num"), remove = F) |> 
+  mutate(num = as.numeric(num)) |> 
+  left_join(sample_meta_use, by = c("num"="mouse")) 
+
+```
+Looking at the 5 lowest correlated samples (mice) for each gene set and doing gene/gene plots to identify which genes are outliers
+
+```{r lowest_cor_inv}
+### Convert the script above so that each tibble is saved
+## Identify the 5 lowest correlated mice for each gene set
+## - Raw Counts (Pearson)
+## - Raw Counts (Spearman)
+## - Norm Counts Overlap (Spearman) 
+## - Norm Counts Kidney (Spearman)
+## - Norm Counts Liver (Spearman)
+## For each gene set, plot gene/gene plots with GBRS/EMASE on the x-axis and STAR on the y-axis, for each tissue separated
+## Title should include: tissue, mouse, dose, sex, strain to look for patterns
+
+count_ref <- tibble(test=c("raw_pear","raw_spear","norm_over_spear","norm_kd_spear","norm_lv_spear"),
+                    correlation_tables=c("star_gbrs_cor_pear_either_tib", "star_gbrs_cor_spear_either_tib","star_gbrs_cor_spear_both_tib","star_gbrs_cor_spear_kd_tib","star_gbrs_cor_spear_lv_tib"),
+                    incl_list=c("star_and_gbrs_either","star_and_gbrs_either","tissue_over_list","kidney_only_list","liver_only_list"),
+                    star_count=c("star_either_filt_mat","star_either_filt_mat","star_tissue_filt_comb","star_kd_filt_mat","star_lv_filt_mat"),
+                    gbrs_count=c("gbrs_either_filt_mat","gbrs_either_filt_mat","gbrs_tissue_filt_comb","gbrs_kd_filt_mat","gbrs_lv_filt_mat"))
+
+i=1
+summ_list <- list()
+for(test in count_ref$test){
+  tmp_tib <- eval(as.name(count_ref$correlation_tables[which(count_ref$test==test)]))
+  gene_incl <- eval(as.name(count_ref$incl_list[which(count_ref$test==test)]))
+  star_count <- eval(as.name(count_ref$star_count[which(count_ref$test==test)]))
+  gbrs_count <- eval(as.name(count_ref$gbrs_count[which(count_ref$test==test)]))
+  for(tiss in c("Kd","Lv")){
+    tmp_tib_tiss <- tmp_tib %>% 
+      dplyr::filter(tissue==tiss) %>% 
+      arrange(cor)
+    five_least <- tmp_tib_tiss$sampleid[1:5]
+    for(id in five_least){
+      plot_tmp <- tibble(genes=gene_incl,
+                         star=star_count[rownames(star_count) %in% gene_incl,paste0(id,"_star")],
+                         gbrs=gbrs_count[rownames(gbrs_count) %in% gene_incl,paste0(id,"_gbrs")])
+      strain_type <- tmp_tib$strain[which(tmp_tib$sampleid==id)]
+      sex_type <- tmp_tib$sex[which(tmp_tib$sampleid==id)]
+      dose_type <- tmp_tib$dose[which(tmp_tib$sampleid==id)]
+      
+      summ_list[[i]] <- c(test, tiss, id, strain_type, sex_type, dose_type)
+      
+      i <- i+1
+      
+      # print(ggplot(plot_tmp, aes(x = gbrs, y = star)) +
+      #   geom_abline(slope = 1, intercept = 0) + geom_point() +
+      #   ggtitle(paste0(id," ",strain_type," ",sex_type," ",dose_type,"\t",test)) +
+      #   theme_light())
+    }
+  }
+}
+
+summ_df <- do.call(rbind, summ_list)
+colnames(summ_df) <- c("test","tissue","ID","strain","sex","dose")
+summ_df <- as.data.frame(summ_df)
+
+summ_df %>% create_dt()
+```

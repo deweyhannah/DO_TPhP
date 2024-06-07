@@ -1,0 +1,736 @@
+---
+title: "GBRS Filtering"
+author: "Hannah Dewey"
+date: "`r Sys.Date()`"
+format: 
+  html:
+    self-contained: true
+    embed-resources: true
+code-fold: true
+toc: true
+---
+
+## Filtering steps for the GBRS/EMASE combined gene set
+Filtering will be done by median(tpm)>0.5
+
+```{r setup}
+#| warning: false
+#| message: false
+
+## Set up environment for this project
+
+library(DESeq2)
+library(tidyverse)
+library(GGally)
+library(reshape2)
+library(DT)
+library(plotly)
+library(RColorBrewer)
+library(gprofiler2)
+set_base_url("https://biit.cs.ut.ee/gprofiler_archive3/e105_eg52_p16/")
+
+create_dt <- function(x){
+  DT::datatable(x,
+                extensions = 'Buttons',
+                rownames = FALSE, 
+                filter="top",
+                options = list(dom = 'Blfrtip',
+                               buttons = c('copy', 'csv', 'excel'),
+                               pageLength = 5, 
+                               scrollX= TRUE
+                               ))
+  
+}
+
+```
+
+```{r load files}
+## Files to be used in this analysis
+
+#gbrs_counts <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/gbrs_counts.txt", row.names = 1, header = T, stringsAsFactors = F)
+sample_list <- read.csv("/projects/munger-lab/projects/DO_TPhP/data/TPhP_DO_gbrs_samples.csv", header = T, stringsAsFactors = F)
+sample_meta <- read.csv("/projects/munger-lab/projects/DO_TPhP/data/TPhPpath2fastqs.csv", header=T, stringsAsFactors = F)
+
+biomart_105 <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/biomart_v105.txt", stringsAsFactors = F)
+
+```
+
+### Read in GBRS/EMASE counts
+```{r make_counts_gbrs}
+#| cache: true
+#| message: false
+
+sample_list <- read.csv("/projects/munger-lab/projects/DO_TPhP/data/TPhP_DO_gbrs_samples.csv", header = T, stringsAsFactors = F)
+
+gbrs_counts <- data.frame()
+for(samp in unique(sample_list$sampleID)){
+  tmp <- read.delim(paste0("/projects/munger-lab/projects/DO_TPhP/GBRS/",samp,"/gbrs/",samp,".diploid.genes.expected_read_counts"), header=T, stringsAsFactors = F)[,c(1,10)]
+  colnames(tmp) <- c("gene_id",samp)
+  if(samp == unique(sample_list$sampleID)[1]){
+    gbrs_counts <- tmp
+  }
+  else{
+    gbrs_counts <- merge(gbrs_counts, tmp, by="gene_id", all=T)
+  }
+}
+
+## Add in EMASE counts from F1s
+emase_samps <- read.csv("/projects/munger-lab/projects/DO_TPhP/data/TPhP_F1_gbrs_samples.csv", header=T, stringsAsFactors = F)
+
+for(samp in unique(emase_samps$sampleID[which(emase_samps$generation==1)])){
+  tmp <- read.delim(paste0("/projects/munger-lab/projects/DO_TPhP/emase/",samp,"/emase/",samp,".multiway.genes.expected_read_counts"), header=T, stringsAsFactors = F)[,c(1,4)]
+  colnames(tmp) <- c("gene_id",samp)
+  gbrs_counts <- merge(gbrs_counts, tmp, by="gene_id", all.x=T)
+}
+
+
+rownames(gbrs_counts) <- gbrs_counts$gene_id
+gbrs_counts <- gbrs_counts[,-1]
+
+#write.table(gbrs_counts, "/projects/munger-lab/projects/DO_TPhP/data/gbrs_counts.txt", quote=F, sep="\t")
+```
+
+### Read in GBRS/EMASE tpm
+```{r make_tpm_gbrs}
+#| cache: true
+#| message: false
+
+#sample_list <- read.csv("/projects/munger-lab/projects/DO_TPhP/data/TPhP_DO_gbrs_samples.csv", header = T, stringsAsFactors = F)
+
+gbrs_tpm <- data.frame()
+for(samp in unique(sample_list$sampleID)){
+  tmp <- read.delim(paste0("/projects/munger-lab/projects/DO_TPhP/GBRS/",samp,"/gbrs/",samp,".diploid.genes.tpm"), header=T, stringsAsFactors = F)[,c(1,10)]
+  colnames(tmp) <- c("gene_id",samp)
+  if(samp == unique(sample_list$sampleID)[1]){
+    gbrs_tpm <- tmp
+  }
+  else{
+    gbrs_tpm <- merge(gbrs_tpm, tmp, by="gene_id", all=T)
+  }
+}
+
+## Add in EMASE counts from F1s
+emase_samps <- read.csv("/projects/munger-lab/projects/DO_TPhP/data/TPhP_F1_gbrs_samples.csv", header=T, stringsAsFactors = F)
+
+for(samp in unique(emase_samps$sampleID[which(emase_samps$generation==1)])){
+  tmp <- read.delim(paste0("/projects/munger-lab/projects/DO_TPhP/emase/",samp,"/emase/",samp,".multiway.genes.tpm"), header=T, stringsAsFactors = F)[,c(1,4)]
+  colnames(tmp) <- c("gene_id",samp)
+  gbrs_tpm <- merge(gbrs_tpm, tmp, by="gene_id", all.x=T)
+}
+
+
+rownames(gbrs_tpm) <- gbrs_tpm$gene_id
+gbrs_tpm <- gbrs_tpm[,-1]
+
+#write.table(gbrs_tpm, "/projects/munger-lab/projects/DO_TPhP/data/gbrs_tpm.txt", quote=F, sep="\t")
+```
+
+### Start Filtering by TPM values GBRS
+```{r tpm_filter}
+#Get median values for gbrs_tpm
+gbrs_tpm$kd_median <- apply(gbrs_tpm[,grepl("Kd", colnames(gbrs_tpm))], 1, median, na.rm=T)
+gbrs_tpm$lv_median <- apply(gbrs_tpm[,grepl("Lv", colnames(gbrs_tpm))], 1, median, na.rm=T)
+
+gbrs_count_sum <- data.frame(row.names=rownames(gbrs_counts))
+
+kd_do <- paste0("Kd_",sample_meta$Mouse..[which(sample_meta$Strain=="DO")])
+lv_do <- paste0("Lv_", sample_meta$Mouse..[which(sample_meta$Strain=="DO")])
+
+gbrs_count_sum$kd <- rowSums(gbrs_counts[,kd_do]!=0)
+gbrs_count_sum$lv <- rowSums(gbrs_counts[,lv_do]!=0)
+
+gbrs_tpm <- gbrs_tpm[rownames(gbrs_counts),]
+#Filter counts table by tpm$median
+
+gbrs_counts_comb_filt <- gbrs_counts[which((gbrs_tpm$kd_median > 0.5 & gbrs_count_sum$kd > 20) & (gbrs_tpm$lv_median > 0.5 & gbrs_count_sum$lv > 20)),]
+gbrs_counts_kd_filt <- gbrs_counts[which((gbrs_tpm$kd_median > 0.5 & gbrs_count_sum$kd > 20) & !(gbrs_tpm$lv_median > 0.5 & gbrs_count_sum$lv > 20)),]
+gbrs_counts_lv_filt <- gbrs_counts[which(!(gbrs_tpm$kd_median > 0.5 & gbrs_count_sum$kd > 20) & (gbrs_tpm$lv_median > 0.5 & gbrs_count_sum$lv > 20)),]
+
+gbrs_counts_kd_all_filt <- gbrs_counts[which(gbrs_tpm$kd_median > 0.5 & gbrs_count_sum$kd > 20),]
+gbrs_counts_lv_all_filt <- gbrs_counts[which(gbrs_tpm$lv_median > 0.5 & gbrs_count_sum$lv > 20),]
+
+gbrs_counts_either_filt <- gbrs_counts[which((gbrs_tpm$kd_median > 0.5 & gbrs_count_sum$kd > 20) | (gbrs_tpm$lv_median > 0.5 & gbrs_count_sum$lv > 20)),]
+# write.table(gbrs_counts_either_filt, "/projects/munger-lab/projects/DO_TPhP/data/gbrs_filtered_either_counts.txt", quote=F, sep="\t")
+
+# write.table(gbrs_counts_comb_filt, "/projects/munger-lab/projects/DO_TPhP/data/gbrs_filtered_combined_counts.txt", quote=F, sep="\t")
+# write.table(gbrs_counts_kd_filt, "/projects/munger-lab/projects/DO_TPhP/data/gbrs_filtered_kidney_only_counts.txt", quote=F, sep="\t")
+# write.table(gbrs_counts_lv_filt, "/projects/munger-lab/projects/DO_TPhP/data/gbrs_filtered_liver_only_counts.txt", quote=F, sep="\t")
+# write.table(gbrs_counts_kd_all_filt, "/projects/munger-lab/projects/DO_TPhP/data/gbrs_filtered_kidney_all_counts.txt", quote=F, sep="\t")
+# write.table(gbrs_counts_lv_all_filt, "/projects/munger-lab/projects/DO_TPhP/data/gbrs_filtered_liver_all_counts.txt", quote=F, sep="\t")
+
+```
+
+##Filtering for STAR alignment
+
+```{r make_counts}
+#| cache: true
+#| message: false
+
+sample_list <- read.csv("/projects/munger-lab/projects/DO_TPhP/data/TPhP_QC_samples.csv", header = T, stringsAsFactors = F)
+
+star_counts <- data.frame()
+for(samp in unique(sample_list$sampleID)){
+  tmp <- read.delim(paste0("/projects/munger-lab/projects/DO_TPhP/RNAseq/",samp,"/",samp,".genes.results"), header=T, stringsAsFactors = F)[,c(1,5)]
+  colnames(tmp) <- c("gene_id",samp)
+  if(samp == unique(sample_list$sampleID)[1]){
+    star_counts <- tmp
+  }
+  else{
+    star_counts <- merge(star_counts, tmp, by="gene_id", all=T)
+  }
+}
+
+rownames(star_counts) <- star_counts$gene_id
+star_counts <- star_counts[,-1]
+
+## TPM matrix
+
+star_tpm <- data.frame()
+for(samp in unique(sample_list$sampleID)){
+  tmp <- read.delim(paste0("/projects/munger-lab/projects/DO_TPhP/RNAseq/",samp,"/",samp,".genes.results"), header=T, stringsAsFactors = F)[,c(1,6)]
+  colnames(tmp) <- c("gene_id",samp)
+  if(samp == unique(sample_list$sampleID)[1]){
+    star_tpm <- tmp
+  }
+  else{
+    star_tpm <- merge(star_tpm, tmp, by="gene_id", all=T)
+  }
+}
+
+rownames(star_tpm) <- star_tpm$gene_id
+star_tpm <- star_tpm[,-1]
+
+star_tpm$kd_median <- apply(star_tpm[,grepl("Kd", colnames(star_tpm))], 1, median, na.rm=T)
+star_tpm$lv_median <- apply(star_tpm[,grepl("Lv", colnames(star_tpm))], 1, median, na.rm=T)
+
+star_tpm <- star_tpm[rownames(star_counts),]
+
+star_count_sum <- data.frame(row.names = rownames(star_counts))
+
+star_count_sum$kd <- rowSums(star_counts[,kd_do]!=0)
+star_count_sum$lv <- rowSums(star_counts[,lv_do]!=0)
+
+star_counts_combined_filt <- star_counts[which((star_tpm$kd_median >= 0.5 & star_count_sum$kd >= 20) & (star_tpm$lv_median >= 0.5 & star_count_sum$lv >= 20)),]
+star_counts_kd_only_filt <- star_counts[which((star_tpm$kd_median >= 0.5 & star_count_sum$kd >= 20) & !(star_tpm$lv_median >= 0.5 & star_count_sum$lv >= 20)),]
+star_counts_lv_only_filt <- star_counts[which(!(star_tpm$kd_median >= 0.5 & star_count_sum$kd >= 20) & (star_tpm$lv_median >= 0.5 & star_count_sum$lv >= 20)),]
+star_counts_kd_all_filt <- star_counts[which(star_tpm$kd_median >= 0.5 & star_count_sum$kd >= 20),]
+star_counts_lv_all_filt <- star_counts[which(star_tpm$lv_median >= 0.5 & star_count_sum$lv >= 20),]
+
+star_counts_either_filt <- star_counts[which((star_tpm$kd_median >= 0.5 & star_count_sum$kd >= 20) | (star_tpm$lv_median >= 0.5 & star_count_sum$lv >= 20)),]
+# write.table(star_counts_either_filt, "/projects/munger-lab/projects/DO_TPhP/data/star_filtered_either_counts.txt", quote=F, sep="\t")
+
+# write.table(star_counts_combined_filt, "/projects/munger-lab/projects/DO_TPhP/data/star_filtered_combined_counts.txt", quote=F, sep="\t")
+# write.table(star_counts_kd_only_filt, "/projects/munger-lab/projects/DO_TPhP/data/star_filtered_kidney_only_counts.txt", quote=F, sep="\t")
+# write.table(star_counts_lv_only_filt, "/projects/munger-lab/projects/DO_TPhP/data/star_filtered_liver_only_counts.txt", quote=F, sep="\t")
+# write.table(star_counts_kd_all_filt, "/projects/munger-lab/projects/DO_TPhP/data/star_filtered_kidney_all_counts.txt", quote=F, sep="\t")
+# write.table(star_counts_lv_all_filt, "/projects/munger-lab/projects/DO_TPhP/data/star_filtered_liver_all_counts.txt", quote=F, sep="\t")
+```
+
+
+### Normalize filtered counts
+```{r filt_deseq}
+#| cache: true
+#| message: false
+
+gbrs_counts_filt_round_kd <- round(gbrs_counts_kd_all_filt)
+star_counts_filt_round_kd <- round(star_counts_kd_all_filt)
+gbrs_counts_filt_round_lv <- round(gbrs_counts_lv_all_filt)
+star_counts_filt_round_lv <- round(star_counts_lv_all_filt)
+
+sample_split <- colsplit(colnames(gbrs_counts_filt_round_kd),"_",c("tissue","mouse_number"))
+
+# sample_table <- data.frame()
+sample_table<- as.data.frame(colnames(gbrs_counts_filt_round_kd))
+colnames(sample_table) <- "ID"
+sample_table$tissue <- "kidney"
+sample_table$tissue[which(sample_split$tissue=="Lv")] <- "liver"
+sample_table$mouse <- sample_split$mouse_number
+
+sample_table<- merge(sample_table, sample_meta[,c("Mouse..", "Sex","Strain", "Dose..mg.kg.","batch_number")], by.x="mouse", by.y="Mouse..", all.x = T)
+colnames(sample_table) <- c("mouse","ID","tissue","sex","strain","dose","batch")
+
+sample_table <- sample_table[,c("ID","mouse","sex","strain","dose","batch","tissue")]
+rownames(sample_table) <- sample_table$ID
+
+#all(rownames(sample_table)==colnames(gbrs_counts))
+
+gbrs_counts_filt_round_kd <- gbrs_counts_filt_round_kd[,rownames(sample_table)]
+star_counts_filt_round_kd <- star_counts_filt_round_kd[,rownames(sample_table)]
+gbrs_counts_filt_round_lv <- gbrs_counts_filt_round_lv[,rownames(sample_table)]
+star_counts_filt_round_lv <- star_counts_filt_round_lv[,rownames(sample_table)]
+
+
+sample_table$strain <- as.factor(sample_table$strain)
+sample_table$sex <- as.factor(sample_table$sex)
+sample_table$dose <- as.factor(sample_table$dose)
+sample_table$batch <- as.factor(sample_table$batch)
+sample_table$tissue <- as.factor(sample_table$tissue)
+
+#Run DESeq for GBRS
+dds_gbrs_filt_kd <- DESeqDataSetFromMatrix(countData = gbrs_counts_filt_round_lv, colData = sample_table,
+                              design = ~ sex + strain + dose + batch + tissue)
+
+dds_gbrs_filt_kd <- DESeq(dds_gbrs_filt_kd)
+
+dds_gbrs_filt_lv <- DESeqDataSetFromMatrix(countData = gbrs_counts_filt_round_lv, colData = sample_table,
+                              design = ~ sex + strain + dose + batch + tissue)
+
+dds_gbrs_filt_lv <- DESeq(dds_gbrs_filt_lv)
+
+#Run DESeq for STAR
+dds_star_filt_kd <- DESeqDataSetFromMatrix(countData = star_counts_filt_round_kd, colData = sample_table,
+                              design = ~ sex + strain + dose + batch + tissue)
+
+dds_star_filt_kd <- DESeq(dds_star_filt_kd)
+
+dds_star_filt_lv <- DESeqDataSetFromMatrix(countData = star_counts_filt_round_lv, colData = sample_table,
+                              design = ~ sex + strain + dose + batch + tissue)
+
+dds_star_filt_lv <- DESeq(dds_star_filt_lv)
+
+gbrs_norm_counts_filt_kd <- counts(dds_gbrs_filt_kd, normalized=T)
+gbrs_norm_counts_filt_lv <- counts(dds_gbrs_filt_lv, normalized=T)
+star_norm_counts_filt_kd <- counts(dds_star_filt_kd, normalized=T)
+star_norm_counts_filt_lv <- counts(dds_star_filt_lv, normalized=T)
+
+write.table(gbrs_norm_counts_filt_kd, "/projects/munger-lab/projects/DO_TPhP/data/gbrs_normalized_counts_filtered_kd_all.txt", sep = "\t", quote = F)
+write.table(gbrs_norm_counts_filt_lv, "/projects/munger-lab/projects/DO_TPhP/data/gbrs_normalized_counts_filtered_lv_all.txt", sep = "\t", quote = F)
+write.table(star_norm_counts_filt_kd, "/projects/munger-lab/projects/DO_TPhP/data/star_normalized_counts_filtered_kd_all.txt", sep = "\t", quote = F)
+write.table(star_norm_counts_filt_lv, "/projects/munger-lab/projects/DO_TPhP/data/star_normalized_counts_filtered_lv_all.txt", sep = "\t", quote = F)
+```
+
+### PCA comparison for PCs 1-10
+dose, sex, batch, tissue, strain
+```{r pc_comp}
+#| cache: true
+#| message: false
+
+gbrs_norm_counts_filt <- counts(dds_gbrs_filt, normalized=T)
+star_norm_counts_filt <- counts(dds_star_filt, normalized=T)
+
+colnames(biomart_105) <- c("id","id.version","gene.start","gene.end","gene.type","chromosome","symbol")
+
+pca_gbrs_filt <- prcomp(t(log1p(gbrs_norm_counts_filt[,sample_table$ID, drop=F])), center=T, scale=F)
+pca_gbrs_filt_df <- as_tibble(pca_gbrs_filt$x, rownames="ID") %>%
+  left_join(sample_table)
+var_gbrs_filt_explained <- (pca_gbrs_filt$sdev^2/sum(pca_gbrs_filt$sdev^2))
+
+pca_star_filt <- prcomp(t(log1p(star_norm_counts_filt[,sample_table$ID, drop=F])), center=T, scale=F)
+pca_star_filt_df <- as_tibble(pca_star_filt$x, rownames="ID") %>%
+  left_join(sample_table)
+var_star_filt_explained <- (pca_star_filt$sdev^2/sum(pca_star_filt$sdev^2))
+
+doses <- brewer.pal(5,"Dark2")
+dose_colors <- c("0"=doses[1], "1"=doses[2], "10"=doses[3], "100"=doses[4], "500"=doses[5])
+sex_colors <- c("F"="magenta","M"="dodgerblue")
+strain_colors <- c("B6C3F1/J" = "orange", "DO"="purple")
+tissue_colors <- c("kidney"="green","liver"="darkgrey")
+
+## Dose
+# pca$x %>% as_tibble(rownames = "ID") %>%
+#   left_join(sample_table) %>%
+pca_gbrs_filt_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=dose),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  scale_color_manual(values = dose_colors) +
+  scale_fill_manual(values = dose_colors) +
+  theme(legend.position = "right") + ggtitle("Dose - GBRS Alignment")
+
+## Sex
+# pca$x %>% as_tibble(rownames = "ID") %>%
+#   left_join(sample_table) %>%
+pca_gbrs_filt_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=sex),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  scale_color_manual(values = sex_colors) +
+  scale_fill_manual(values = sex_colors) +
+  theme(legend.position = "right") + ggtitle("Sex - GBRS Alignment")
+
+## Batch
+# pca$x %>% as_tibble(rownames = "ID") %>%
+#   left_join(sample_table) %>%
+pca_gbrs_filt_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=batch),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  #scale_color_manual(values = strain_colors) +
+  #scale_fill_manual(values = strain_colors) +
+  theme(legend.position = "right") + ggtitle("Batch - GBRS Alignment")
+
+## Tissue
+# pca$x %>% as_tibble(rownames = "ID") %>%
+#   left_join(sample_table) %>%
+pca_gbrs_filt_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=tissue),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  scale_color_manual(values = tissue_colors) +
+  scale_fill_manual(values = tissue_colors) +
+  theme(legend.position = "right") + ggtitle("Tissue - GBRS Alignment")
+
+## Strain
+# pca$x %>% as_tibble(rownames = "ID") %>%
+#   left_join(sample_table) %>%
+pca_gbrs_filt_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=strain),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  scale_color_manual(values = strain_colors) +
+  scale_fill_manual(values = strain_colors) +
+  theme(legend.position = "right") + ggtitle("Strain - GBRS Alignment")
+
+tibble(var = var_gbrs_filt_explained[1:10]*100, PC = paste0("PC", seq(1:10))) %>%
+  arrange(desc(var)) %>%
+  mutate(label = factor(PC, levels = PC)) %>%
+  ggplot(aes(x = label, y = var)) +
+  geom_col() +
+  xlab("Principal Component") +
+  ylab("% Variation Explained") +
+  ggtitle("GBRS Alignment Scree") +
+  theme_light(base_size = 14) 
+
+
+###Star alignment
+## Dose
+pca_star_filt_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=dose),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  scale_color_manual(values = dose_colors) +
+  scale_fill_manual(values = dose_colors) +
+  theme(legend.position = "right") + ggtitle("Dose - STAR Alignment")
+
+## Sex
+pca_star_filt_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=sex),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  scale_color_manual(values = sex_colors) +
+  scale_fill_manual(values = sex_colors) +
+  theme(legend.position = "right") + ggtitle("Sex - STAR Alignment")
+
+## Batch
+pca_star_filt_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=batch),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  theme(legend.position = "right") + ggtitle("Batch - STAR Alignment")
+
+## Tissue
+pca_star_filt_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=tissue),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  scale_color_manual(values = tissue_colors) +
+  scale_fill_manual(values = tissue_colors) +
+  theme(legend.position = "right") + ggtitle("Tissue - STAR Alignment")
+
+## Strain
+pca_star_filt_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=strain),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  scale_color_manual(values = strain_colors) +
+  scale_fill_manual(values = strain_colors) +
+  theme(legend.position = "right") + ggtitle("Strain - STAR Alignment")
+
+tibble(var = var_star_filt_explained[1:10]*100, PC = paste0("PC", seq(1:10))) %>%
+  arrange(desc(var)) %>%
+  mutate(label = factor(PC, levels = PC)) %>%
+  ggplot(aes(x = label, y = var)) +
+  geom_col() +
+  xlab("Principal Component") +
+  ylab("% Variation Explained") +
+  ggtitle("STAR Alignment Scree") +
+  theme_light(base_size = 14)
+```
+
+Driver identification
+```{r overrepresentation}
+#| cache: true
+
+###GBRS
+gbrs_gene_incl <- colsplit(rownames(pca_gbrs_filt$rotation), "_", c("id","symbol"))
+rownames(pca_gbrs_filt$rotation) <- gbrs_gene_incl$id
+
+gbrs_pc1_drivers <- pca_gbrs_filt$rotation[,"PC1", drop=F] %>%
+  as_tibble(rownames = "id") %>%
+  left_join(biomart_105 %>% select(id, symbol)) %>%
+  filter(abs(PC1) >= quantile(abs(PC1), 0.95))
+
+gbrs_pc2_drivers <- pca_gbrs_filt$rotation[,"PC2", drop=F] %>%
+  as_tibble(rownames = "id") %>%
+  left_join(biomart_105 %>% select(id, symbol)) %>%
+  filter(abs(PC2) >= quantile(abs(PC2), 0.95))
+
+gbrs_pc3_drivers <- pca_gbrs_filt$rotation[,"PC3", drop=F] %>%
+  as_tibble(rownames = "id") %>%
+  left_join(biomart_105 %>% select(id, symbol)) %>%
+  filter(abs(PC3) >= quantile(abs(PC3), 0.95))
+
+gbrs_pc4_drivers <- pca_gbrs_filt$rotation[,"PC4", drop=F] %>%
+  as_tibble(rownames = "id") %>%
+  left_join(biomart_105 %>% select(id, symbol)) %>%
+  filter(abs(PC4) >= quantile(abs(PC4), 0.95))
+
+gbrs_biomart_sub <- biomart_105 %>%
+  filter(id %in% gbrs_gene_incl$id)
+
+gbrs.g.pc1 <- gost(
+  query = gbrs_pc1_drivers$symbol,
+  organism = 'mmusculus',
+  domain_scope = "custom",
+  custom_bg = gbrs_biomart_sub$symbol, # Make a list of genes here that is a subset of this based on expression matrix
+  evcodes = T
+)
+
+gbrs.g.pc2 <- gost(
+  query = gbrs_pc2_drivers$symbol,
+  organism = 'mmusculus',
+  domain_scope = "custom",
+  custom_bg = gbrs_biomart_sub$symbol, # Make a list of genes here that is a subset of this based on expression matrix
+  evcodes = T
+)
+
+gbrs.g.pc3 <- gost(
+  query = gbrs_pc3_drivers$symbol,
+  organism = 'mmusculus',
+  domain_scope = "custom",
+  custom_bg = gbrs_biomart_sub$symbol, # Make a list of genes here that is a subset of this based on expression matrix
+  evcodes = T
+)
+
+gbrs.g.pc4 <- gost(
+  query = gbrs_pc4_drivers$symbol,
+  organism = 'mmusculus',
+  domain_scope = "custom",
+  custom_bg = gbrs_biomart_sub$symbol, # Make a list of genes here that is a subset of this based on expression matrix
+  evcodes = T
+)
+
+gbrs.g.pc1$result <- gbrs.g.pc1$result %>% filter(term_size < 660)
+gbrs.g.pc2$result <- gbrs.g.pc2$result %>% filter(term_size < 660)
+gbrs.g.pc3$result <- gbrs.g.pc3$result %>% filter(term_size < 660)
+gbrs.g.pc4$result <- gbrs.g.pc4$result %>% filter(term_size < 660)
+
+gbrs.g.pc1$result %>%
+  mutate(PC = "PC1") %>%
+  select(PC, term_name, source, FDR = p_value, term_size, intersection_size, intersection) %>%
+  filter(FDR < 0.01) %>% 
+  rbind(
+    gbrs.g.pc2$result %>% 
+    mutate( PC = "PC2") %>% 
+    select( PC, term_name, source, FDR = p_value, term_size, intersection_size,intersection) %>% 
+    filter( FDR <0.01) 
+  ) %>%
+  rbind(
+    gbrs.g.pc3$result %>% 
+    mutate( PC = "PC3") %>% 
+    select( PC, term_name, source, FDR = p_value, term_size, intersection_size,intersection) %>% 
+    filter( FDR <0.01) 
+  ) %>%
+  rbind(
+    gbrs.g.pc4$result %>% 
+    mutate( PC = "PC4") %>% 
+    select( PC, term_name, source, FDR = p_value, term_size, intersection_size,intersection) %>% 
+    filter( FDR <0.01) 
+  ) %>%
+  mutate_if( is.numeric, formatC, digits =2) %>% 
+  create_dt()
+
+###STAR
+star_gene_incl <- colsplit(rownames(pca_star_filt$rotation), "_", c("id","symbol"))
+rownames(pca_star_filt$rotation) <- star_gene_incl$id
+
+star_pc1_drivers <- pca_star_filt$rotation[,"PC1", drop=F] %>%
+  as_tibble(rownames = "id") %>%
+  left_join(biomart_105 %>% select(id, symbol)) %>%
+  filter(abs(PC1) >= quantile(abs(PC1), 0.95))
+
+star_pc2_drivers <- pca_star_filt$rotation[,"PC2", drop=F] %>%
+  as_tibble(rownames = "id") %>%
+  left_join(biomart_105 %>% select(id, symbol)) %>%
+  filter(abs(PC2) >= quantile(abs(PC2), 0.95))
+
+star_pc3_drivers <- pca_star_filt$rotation[,"PC3", drop=F] %>%
+  as_tibble(rownames = "id") %>%
+  left_join(biomart_105 %>% select(id, symbol)) %>%
+  filter(abs(PC3) >= quantile(abs(PC3), 0.95))
+
+star_pc4_drivers <- pca_star_filt$rotation[,"PC4", drop=F] %>%
+  as_tibble(rownames = "id") %>%
+  left_join(biomart_105 %>% select(id, symbol)) %>%
+  filter(abs(PC4) >= quantile(abs(PC4), 0.95))
+
+
+star_biomart_sub <- biomart_105 %>%
+  filter(id %in% star_gene_incl$id)
+
+star.g.pc1 <- gost(
+  query = star_pc1_drivers$symbol,
+  organism = 'mmusculus',
+  domain_scope = "custom",
+  custom_bg = star_biomart_sub$symbol, # Make a list of genes here that is a subset of this based on expression matrix
+  evcodes = T
+)
+
+star.g.pc2 <- gost(
+  query = star_pc2_drivers$symbol,
+  organism = 'mmusculus',
+  domain_scope = "custom",
+  custom_bg = star_biomart_sub$symbol, # Make a list of genes here that is a subset of this based on expression matrix
+  evcodes = T
+)
+
+star.g.pc3 <- gost(
+  query = star_pc3_drivers$symbol,
+  organism = 'mmusculus',
+  domain_scope = "custom",
+  custom_bg = star_biomart_sub$symbol, # Make a list of genes here that is a subset of this based on expression matrix
+  evcodes = T
+)
+
+star.g.pc4 <- gost(
+  query = star_pc4_drivers$symbol,
+  organism = 'mmusculus',
+  domain_scope = "custom",
+  custom_bg = star_biomart_sub$symbol, # Make a list of genes here that is a subset of this based on expression matrix
+  evcodes = T
+)
+
+star.g.pc1$result <- star.g.pc1$result %>% filter(term_size < 660)
+star.g.pc2$result <- star.g.pc2$result %>% filter(term_size < 660)
+star.g.pc3$result <- star.g.pc3$result %>% filter(term_size < 660)
+star.g.pc4$result <- star.g.pc4$result %>% filter(term_size < 660)
+
+star.g.pc1$result %>%
+  mutate(PC = "PC1") %>%
+  select(PC, term_name, source, FDR = p_value, term_size, intersection_size, intersection) %>%
+  filter(FDR < 0.01) %>% 
+  rbind(
+    star.g.pc2$result %>% 
+    mutate( PC = "PC2") %>% 
+    select( PC, term_name, source, FDR = p_value, term_size, intersection_size,intersection) %>% 
+    filter( FDR <0.01) 
+  ) %>%
+  rbind(
+    star.g.pc3$result %>% 
+    mutate( PC = "PC3") %>% 
+    select( PC, term_name, source, FDR = p_value, term_size, intersection_size,intersection) %>% 
+    filter( FDR <0.01) 
+  ) %>%
+  rbind(
+    star.g.pc4$result %>% 
+    mutate( PC = "PC4") %>% 
+    select( PC, term_name, source, FDR = p_value, term_size, intersection_size,intersection) %>% 
+    filter( FDR <0.01) 
+  ) %>%
+  mutate_if( is.numeric, formatC, digits =2) %>% 
+  create_dt()
+```
+
+### Independent Filtering of DESeq results
+```{r deseq_filt}
+#| eval: false
+gbrs_res <- results(dds_filt)
+
+metadata(gbrs_res)$alpha ## [1] 0.1
+metadata(gbrs_res)$filterThreshold ## 0% 0.9249311
+
+#pdf("meta_cutoff.pdf")
+plot(metadata(gbrs_res)$filterNumRej, 
+     type="b", ylab="number of rejections",
+     xlab="quantiles of filter")
+lines(metadata(gbrs_res)$lo.fit, col="red")
+abline(v=metadata(gbrs_res)$filterTheta)
+#dev.off()
+
+resNoFilt <- results(dds_filt, independentFiltering=FALSE)
+addmargins(table(filtering=(gbrs_res$padj < .1),
+                 noFiltering=(resNoFilt$padj < .1)))
+
+summary(gbrs_res$padj)
+summary(resNoFilt$padj)
+
+```
+
+Finding the tpm threshold
+```{r tpm_thresholding}
+#| cache: true
+#| message: false
+#| eval: false
+dds_tpm <- list()
+
+for(t in seq(0.05, 0.5, by=0.05)){
+  list_name <- paste0("tpm_val_",t)
+  gbrs_counts_filt <- gbrs_counts[which(gbrs_tpm$kd_median > t | gbrs_tpm$lv_median > t),]
+  gbrs_counts_filt_round <- round(gbrs_counts_filt)
+  
+  gbrs_counts_filt_round <- gbrs_counts_filt_round[,rownames(sample_table)]
+  dds_filt <- DESeqDataSetFromMatrix(countData = gbrs_counts_filt_round, colData = sample_table,
+                              design = ~ sex + strain + dose + batch + tissue)
+
+  dds_filt <- DESeq(dds_filt)
+  dds_tpm[[list_name]] <- dds_filt
+  
+  gbrs_res <- results(dds_filt)
+  
+  plot(metadata(gbrs_res)$filterNumRej, 
+     type="b", ylab="number of rejections",
+     xlab="quantiles of filter", main=paste0("tpm threshold: ",t))
+  lines(metadata(gbrs_res)$lo.fit, col="red")
+  abline(v=metadata(gbrs_res)$filterTheta)
+  
+  resNoFilt <- results(dds_filt, independentFiltering=FALSE)
+  print(paste0("min tpm: ", t))
+  print(addmargins(table(filtering=(gbrs_res$padj < .1),
+                 noFiltering=(resNoFilt$padj < .1))))
+}
+```
+
+STAR TPM Thresholding
+```{r star_tpm_thresholding}
+#| cache: false
+#| message: false
+#| eval: false
+
+star_dds_tpm <- list()
+
+for(t in seq(0.05, 0.5, by=0.05)){
+  list_name <- paste0("tpm_val_",t)
+  star_counts_filt <- star_counts[which(star_tpm$kd_median > t | star_tpm$lv_median > t),]
+  star_counts_filt_round <- round(star_counts_filt)
+  
+  star_counts_filt_round <- star_counts_filt_round[,rownames(sample_table)]
+  star_dds_filt <- DESeqDataSetFromMatrix(countData = star_counts_filt_round, colData = sample_table,
+                              design = ~ sex + strain + dose + batch + tissue)
+
+  star_dds_filt <- DESeq(star_dds_filt)
+  star_dds_tpm[[list_name]] <- star_dds_filt
+  
+  star_res <- results(star_dds_filt)
+  
+  plot(metadata(star_res)$filterNumRej, 
+     type="b", ylab="number of rejections",
+     xlab="quantiles of filter", main=paste0("tpm threshold: ",t))
+  lines(metadata(star_res)$lo.fit, col="red")
+  abline(v=metadata(star_res)$filterTheta)
+  
+  star_resNoFilt <- results(star_dds_filt, independentFiltering=FALSE)
+  print(paste0("min tpm: ", t))
+  print(addmargins(table(filtering=(star_res$padj < .1),
+                 noFiltering=(star_resNoFilt$padj < .1))))
+}
+```

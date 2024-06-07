@@ -1,0 +1,257 @@
+---
+title: "STAR DESeq first pass"
+author: "Hannah Dewey"
+date: "`r Sys.Date()`"
+format: 
+  html:
+    self-contained: true
+    embed-resources: true
+code-fold: true
+toc: true
+---
+
+```{r setup}
+#| warning: false
+#| message: false
+
+## Set up environment for this project
+
+library(DESeq2)
+library(tidyverse)
+library(GGally)
+library(reshape2)
+library(DT)
+library(plotly)
+library(gprofiler2)
+set_base_url("https://biit.cs.ut.ee/gprofiler_archive3/e105_eg52_p16/")
+
+create_dt <- function(x){
+  DT::datatable(x,
+                extensions = 'Buttons',
+                rownames = FALSE, 
+                filter="top",
+                options = list(dom = 'Blfrtip',
+                               buttons = c('copy', 'csv', 'excel'),
+                               pageLength = 5, 
+                               scrollX= TRUE
+                               ))
+  
+}
+
+```
+
+## Run Jax RNAseq pipeline with STAR aligner
+  - submission file: `/projects/munger-lab/projects/DO_TPhP/scripts/DO_TPhP_rnaseq_submit.sh`
+  - sample file: `/projects/munger-lab/projects/DO_TPhP/data/TPhP_QC_samples.csv`
+  - RNAseq outputs: `/projects/munger-lab/projects/DO_TPhP/RNAseq/`
+  
+## Set up count table for use with DESeq
+Assemble the expected counts from the STAR alignment into a count table to be used as input for DESeq
+```{r make_counts}
+#| cache: true
+#| message: false
+
+sample_list <- read.csv("/projects/munger-lab/projects/DO_TPhP/data/TPhP_QC_samples.csv", header = T, stringsAsFactors = F)
+
+star_counts <- data.frame()
+for(samp in unique(sample_list$sampleID)){
+  tmp <- read.delim(paste0("/projects/munger-lab/projects/DO_TPhP/RNAseq/",samp,"/",samp,".genes.results"), header=T, stringsAsFactors = F)[,c(1,5)]
+  colnames(tmp) <- c("gene_id",samp)
+  if(samp == unique(sample_list$sampleID)[1]){
+    star_counts <- tmp
+  }
+  else{
+    star_counts <- merge(star_counts, tmp, by="gene_id", all=T)
+  }
+}
+
+rownames(star_counts) <- star_counts$gene_id
+star_counts <- star_counts[,-1]
+
+#write.table(star_counts, "/projects/munger-lab/projects/DO_TPhP/data/star_counts.txt", quote=F, sep="\t")
+```
+
+```{r load files}
+## Files to be used in this analysis
+
+star_counts <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/star_counts.txt", row.names = 1, header = T, stringsAsFactors = F)
+sample_list <- read.csv("/projects/munger-lab/projects/DO_TPhP/data/TPhP_QC_samples.csv", header = T, stringsAsFactors = F)
+sample_meta <- read.csv("/projects/munger-lab/projects/DO_TPhP/data/TPhPpath2fastqs.csv", header=T, stringsAsFactors = F)
+
+biomart_105 <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/biomart_v105.txt", stringsAsFactors = F)
+
+```
+
+## Run DESeq on STAR counts
+```{r run_deseq}
+#| cache: true
+#| message: false
+
+sample_split <- colsplit(colnames(star_counts),"_",c("tissue","mouse_number"))
+
+# sample_table <- data.frame()
+sample_table<- as.data.frame(colnames(star_counts))
+colnames(sample_table) <- "ID"
+sample_table$tissue <- "kidney"
+sample_table$tissue[which(sample_split$tissue=="Lv")] <- "liver"
+sample_table$mouse <- sample_split$mouse_number
+
+sample_table<- merge(sample_table, sample_meta[,c("Mouse..", "Sex", "Strain", "Dose..mg.kg.","batch_number")], by.x="mouse", by.y="Mouse..")
+colnames(sample_table) <- c("mouse","ID","tissue","sex","strain","dose","batch")
+
+sample_table <- sample_table[,c("ID","mouse","strain","sex","dose","batch","tissue")]
+rownames(sample_table) <- sample_table$ID
+
+#all(rownames(sample_table)==colnames(star_counts))
+
+star_counts <- star_counts[,rownames(sample_table)]
+star_counts_round <- round(star_counts)
+
+sample_table$strain <- as.factor(sample_table$strain)
+sample_table$sex <- as.factor(sample_table$sex)
+sample_table$dose <- as.factor(sample_table$dose)
+sample_table$batch <- as.factor(sample_table$batch)
+sample_table$tissue <- as.factor(sample_table$tissue)
+
+dds <- DESeqDataSetFromMatrix(countData = star_counts_round, colData = sample_table,
+                              design = ~ strain + sex + dose + batch + tissue)
+
+dds <- DESeq(dds)
+
+```
+
+## Start looking at PCA
+```{r pca_setup}
+
+star_norm_counts <- counts(dds, normalized=T)
+
+colnames(biomart_105) <- c("id","id.version","gene.start","gene.end","gene.type","chromosome","symbol")
+
+pca_star <- prcomp(t(log1p(star_norm_counts[,sample_table$ID, drop=F])), center=T, scale=F)
+pca_star_df <- as_tibble(pca_star$x, rownames="ID") %>%
+  left_join(sample_table)
+var_explained <- (pca_star$sdev^2/sum(pca_star$sdev^2))
+
+```
+
+##Principal Component Comparison
+```{r pc_comp}
+#| cache: true
+#strain_colors <- c("B6C3F1/J" = "black", "DO" = "green")
+
+## Dose
+pca_star$x %>% as_tibble(rownames = "ID") %>%
+  left_join(sample_table) %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=dose),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  #scale_color_manual(values = strain_colors) +
+  #scale_fill_manual(values = strain_colors) +
+  theme(legend.position = "right")
+
+## Strain
+pca$x %>% as_tibble(rownames = "ID") %>%
+  left_join(sample_table) %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=strain),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  #scale_color_manual(values = strain_colors) +
+  #scale_fill_manual(values = strain_colors) +
+  theme(legend.position = "right")
+
+## Sex
+pca$x %>% as_tibble(rownames = "ID") %>%
+  left_join(sample_table) %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=sex),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  #scale_color_manual(values = strain_colors) +
+  #scale_fill_manual(values = strain_colors) +
+  theme(legend.position = "right")
+
+## Batch
+pca$x %>% as_tibble(rownames = "ID") %>%
+  left_join(sample_table) %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=batch),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  #scale_color_manual(values = strain_colors) +
+  #scale_fill_manual(values = strain_colors) +
+  theme(legend.position = "right")
+
+## Tissue
+pca$x %>% as_tibble(rownames = "ID") %>%
+  left_join(sample_table) %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=tissue),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  #scale_color_manual(values = strain_colors) +
+  #scale_fill_manual(values = strain_colors) +
+  theme(legend.position = "right")
+
+tibble(var = var_explained[1:10]*100, PC = paste0("PC", seq(1:10))) %>%
+  arrange(desc(var)) %>%
+  mutate(label = factor(PC, levels = PC)) %>%
+  ggplot(aes(x = label, y = var)) +
+  geom_col() +
+  xlab("Principal Component") +
+  ylab("% Variation Explained") +
+  theme_light(base_size = 14)
+```
+
+##Drivers in PCs
+```{r drivers}
+#| cache: true
+gene_incl <- colsplit(rownames(pca$rotation), "_", c("id","symbol"))
+rownames(pca$rotation) <- gene_incl$id
+
+pc1_drivers <- pca$rotation[,"PC1", drop=F] %>%
+  as_tibble(rownames = "id") %>%
+  left_join(biomart_105 %>% select(id, symbol)) %>%
+  filter(abs(PC1) >= quantile(abs(PC1), 0.95))
+
+pc2_drivers <- pca$rotation[,"PC2", drop=F] %>%
+  as_tibble(rownames = "id") %>%
+  left_join(biomart_105 %>% select(id, symbol)) %>%
+  filter(abs(PC2) >= quantile(abs(PC2), 0.95))
+
+biomart_sub <- biomart_105 %>%
+  filter(id %in% gene_incl$id)
+
+g.pc1 <- gost(
+  query = pc1_drivers$symbol,
+  organism = 'mmusculus',
+  domain_scope = "custom",
+  custom_bg = biomart_sub$symbol, # Make a list of genes here that is a subset of this based on expression matrix
+  evcodes = T
+)
+
+g.pc2 <- gost(
+  query = pc2_drivers$symbol,
+  organism = 'mmusculus',
+  domain_scope = "custom",
+  custom_bg = biomart_sub$symbol, # Make a list of genes here that is a subset of this based on expression matrix
+  evcodes = T
+)
+
+g.pc1$result <- g.pc1$result %>% filter(term_size < 660)
+g.pc2$result <- g.pc2$result %>% filter(term_size < 660)
+
+g.pc1$result %>%
+  mutate(PC = "PC1") %>%
+  select(PC, term_name, source, FDR = p_value, term_size, intersection_size, intersection) %>%
+  filter(FDR < 0.01) %>% 
+  rbind(
+    g.pc2$result %>% 
+    mutate( PC = "PC2") %>% 
+    select( PC, term_name, source, FDR = p_value, term_size, intersection_size,intersection) %>% 
+    filter( FDR <0.01) 
+  ) %>%
+  mutate_if( is.numeric, formatC, digits =2) %>% 
+  create_dt()
+```

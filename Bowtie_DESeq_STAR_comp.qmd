@@ -1,0 +1,290 @@
+---
+title: "Bowtie2 Comparison Analysis"
+author: "Hannah Dewey"
+date: "`r Sys.Date()`"
+format: 
+  html:
+    self-contained: true
+    embed-resources: true
+code-fold: true
+toc: true
+---
+```{r setup}
+#| warning: false
+#| message: false
+
+## Set up environment for this project
+
+library(DESeq2)
+library(tidyverse)
+library(RColorBrewer)
+library(GGally)
+library(reshape2)
+library(DT)
+library(plotly)
+library(gprofiler2)
+set_base_url("https://biit.cs.ut.ee/gprofiler_archive3/e105_eg52_p16/")
+
+create_dt <- function(x){
+  DT::datatable(x,
+                extensions = 'Buttons',
+                rownames = FALSE, 
+                filter="top",
+                options = list(dom = 'Blfrtip',
+                               buttons = c('copy', 'csv', 'excel'),
+                               pageLength = 5, 
+                               scrollX= TRUE
+                               ))
+  
+}
+
+```
+## Reasoning for this analysis
+This analysis is being run to help determine the origin of the high number of mitochondrial genes identified in the EMASE/GBRS analysis of this same data. In an effort to see if the swing towards MT genes is due to the aligner being used or the trimming of the reads before the alignment this analysis was run on the full length paired end reads and using the Bowtie2 aligner instead of STAR.
+
+## Run Jax RNAseq pipeline with Bowtie2 aligner
+  - submission file: `/projects/munger-lab/projects/DO_TPhP/scripts/DO_TPhP_rnaseq_submit.sh`
+  - sample file: `/projects/munger-lab/projects/DO_TPhP/data/TPhP_QC_samples.csv`
+  - RNAseq outputs: `/projects/munger-lab/projects/DO_TPhP/RNAseq/bowtie`
+  
+## Set up count table for use with DESeq
+Assemble the expected counts from the Bowtie2 alignment into a count table to be used as input for DESeq
+```{r make_counts}
+#| cache: true
+#| message: false
+
+sample_list <- read.csv("/projects/munger-lab/projects/DO_TPhP/data/TPhP_QC_samples.csv", header = T, stringsAsFactors = F)
+
+bow_counts <- data.frame()
+for(samp in unique(sample_list$sampleID)){
+  tmp <- read.delim(paste0("/projects/munger-lab/projects/DO_TPhP/RNAseq/bowtie/",samp,"/",samp,".genes.results"), header=T, stringsAsFactors = F)[,c(1,5)]
+  colnames(tmp) <- c("gene_id",samp)
+  if(samp == unique(sample_list$sampleID)[1]){
+    bow_counts <- tmp
+  }
+  else{
+    bow_counts <- merge(bow_counts, tmp, by="gene_id", all=T)
+  }
+}
+
+rownames(bow_counts) <- bow_counts$gene_id
+bow_counts <- bow_counts[,-1]
+
+write.table(bow_counts, "/projects/munger-lab/projects/DO_TPhP/data/bow_counts.txt", quote=F, sep="\t")
+```
+
+## Make sure files are loaded in
+If running everything at once it is not necessary to load in the count table again since it was created above, if running at a later date, then the count table does not need to be created again and the previous chunk can be skipped.
+```{r load files}
+## Files to be used in this analysis
+
+#bow_counts <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/bow_counts.txt", row.names = 1, header = T, stringsAsFactors = F)
+#sample_list <- read.csv("/projects/munger-lab/projects/DO_TPhP/data/TPhP_QC_samples.csv", header = T, stringsAsFactors = F)
+sample_meta <- read.csv("/projects/munger-lab/projects/DO_TPhP/data/TPhPpath2fastqs.csv", header=T, stringsAsFactors = F)
+
+biomart_105 <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/biomart_v105.txt", stringsAsFactors = F)
+
+```
+
+## Run DESeq on Bowtie2 counts
+Normalize the counts using the VST normalization method
+```{r run_deseq}
+#| cache: true
+#| message: false
+
+sample_split <- colsplit(colnames(bow_counts),"_",c("tissue","mouse_number"))
+
+# sample_table <- data.frame()
+sample_table<- as.data.frame(colnames(bow_counts))
+colnames(sample_table) <- "ID"
+sample_table$tissue <- "kidney"
+sample_table$tissue[which(sample_split$tissue=="Lv")] <- "liver"
+sample_table$mouse <- sample_split$mouse_number
+
+sample_table<- merge(sample_table, sample_meta[,c("Mouse..", "Sex", "Strain", "Dose..mg.kg.","batch_number")], by.x="mouse", by.y="Mouse..")
+colnames(sample_table) <- c("mouse","ID","tissue","sex","strain","dose","batch")
+
+sample_table <- sample_table[,c("ID","mouse","strain","sex","dose","batch","tissue")]
+rownames(sample_table) <- sample_table$ID
+
+#all(rownames(sample_table)==colnames(bow_counts))
+
+bow_counts <- bow_counts[,rownames(sample_table)]
+bow_counts_round <- round(bow_counts)
+
+sample_table$strain <- as.factor(sample_table$strain)
+sample_table$sex <- as.factor(sample_table$sex)
+sample_table$dose <- as.factor(sample_table$dose)
+sample_table$batch <- as.factor(sample_table$batch)
+sample_table$tissue <- as.factor(sample_table$tissue)
+
+dds <- DESeqDataSetFromMatrix(countData = bow_counts_round, colData = sample_table,
+                              design = ~ strain + sex + dose + batch + tissue)
+
+dds <- DESeq(dds)
+
+```
+
+## Prinicipal Component Analysis
+Set up principal component analysis using `prcomp` and calculate the variance explained.
+```{r pca_setup}
+#| cache: true
+bow_norm_counts <- counts(dds, normalized=T)
+
+write.table(bow_norm_counts, "/projects/munger-lab/projects/DO_TPhP/data/bow_normalized_counts.txt", quote = F, sep = "\t")
+
+colnames(biomart_105) <- c("id","id.version","gene.start","gene.end","gene.type","chromosome","symbol")
+
+pca_bow <- prcomp(t(log1p(bow_norm_counts[,sample_table$ID, drop=F])), center=T, scale=F)
+pca_bow_df <- as_tibble(pca_bow$x, rownames="ID") %>%
+  left_join(sample_table)
+var_explained <- (pca_bow$sdev^2/sum(pca_bow$sdev^2))
+
+```
+
+Plot the first 10 principal components in a `ggpairs` plot with the coloring for each dictated by one of the following:
+
+  - Dose
+  - Strain - DO vs F1
+  - Sex
+  - Batch
+  - Tissue
+
+Compare the principal components with the different variables to see if we can draw the same conclusions about variable association as with the STAR and EMASE/GBRS counts.
+```{r pc_comp}
+#| cache: true
+doses <- brewer.pal(5,"Dark2")
+dose_colors <- c("0"=doses[1], "1"=doses[2], "10"=doses[3], "100"=doses[4], "500"=doses[5])
+sex_colors <- c("F"="magenta","M"="dodgerblue")
+strain_colors <- c("B6C3F1/J" = "orange", "DO"="purple")
+tissue_colors <- c("kidney"="green","liver"="darkgrey")
+
+## Dose
+pca_bow$x %>% as_tibble(rownames = "ID") %>%
+  left_join(sample_table) %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=dose),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  scale_color_manual(values = dose_colors) +
+  scale_fill_manual(values = dose_colors) +
+  theme(legend.position = "right")
+
+## Strain
+pca_bow$x %>% as_tibble(rownames = "ID") %>%
+  left_join(sample_table) %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=strain),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  scale_color_manual(values = strain_colors) +
+  scale_fill_manual(values = strain_colors) +
+  theme(legend.position = "right")
+
+## Sex
+pca_bow$x %>% as_tibble(rownames = "ID") %>%
+  left_join(sample_table) %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=sex),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  scale_color_manual(values = sex_colors) +
+  scale_fill_manual(values = sex_colors) +
+  theme(legend.position = "right")
+
+## Batch
+pca_bow$x %>% as_tibble(rownames = "ID") %>%
+  left_join(sample_table) %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=batch),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  # scale_color_manual(values = batch_colors) +
+  # scale_fill_manual(values = batch_colors) +
+  theme(legend.position = "right")
+
+## Tissue
+pca_bow$x %>% as_tibble(rownames = "ID") %>%
+  left_join(sample_table) %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=tissue),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  scale_color_manual(values = tissue_colors) +
+  scale_fill_manual(values = tissue_colors) +
+  theme(legend.position = "right")
+
+tibble(var = var_explained[1:10]*100, PC = paste0("PC", seq(1:10))) %>%
+  arrange(desc(var)) %>%
+  mutate(label = factor(PC, levels = PC)) %>%
+  ggplot(aes(x = label, y = var)) +
+  geom_col() +
+  xlab("Principal Component") +
+  ylab("% Variation Explained") +
+  theme_light(base_size = 14)
+```
+
+## Compare normalized STAR counts to normalized Bowtie2 counts
+Read in normalized STAR counts and then do a direct comparison between all the samples.
+```{r aln_comp}
+#| cache: true
+star_norm_counts <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/star_normalized_counts.txt", stringsAsFactors = F)
+#bow_norm_counts <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/bow_normalized_counts.txt", stringsAsFactors = F)
+
+## Sample wise comparisons
+bow_star_comp_pearson <- cor(star_norm_counts, bow_norm_counts, method = "pearson")
+bow_star_comp_spearman <- cor(star_norm_counts, bow_norm_counts, method = "spearman")
+
+pearson_comp <- diag(bow_star_comp_pearson) %>% as.data.frame()
+colnames(pearson_comp) <- "pearson"
+pearson_comp %>% ggplot(aes(x = pearson)) +
+  geom_density() +
+  ggtitle("Pearson Correlation - sample wise") +
+  theme_light()
+
+spearman_comp <- diag(bow_star_comp_spearman) %>% as.data.frame()
+colnames(spearman_comp) <- "spearman"
+spearman_comp %>% ggplot(aes(x = spearman)) +
+  geom_density() +
+  ggtitle("Spearman Correlation - sample wise") +
+  theme_light()
+
+## Investigate outliers in Pearson correlation (correlation < 0.9)
+pearson_outliers <- pearson_comp %>% dplyr::filter(pearson < 0.9)
+pearson_outliers
+### All outlier samples are liver samples. Looking at gene wise correlations next to see which ones might be causing this
+
+## Looking for genes that are outliers for one set of counts and not the other
+star_norm_nonzero <- rownames(star_norm_counts)[which(rowSums(star_norm_counts) > 0)]
+bow_norm_nonzero <- rownames(bow_norm_counts)[which(rowSums(bow_norm_counts) > 0)]
+
+`%notin%` <- Negate(`%in%`)
+bow_norm_nonzero_unique <- bow_norm_nonzero[bow_norm_nonzero %notin% star_norm_nonzero]
+star_norm_nonzero_unique <- star_norm_nonzero[star_norm_nonzero %notin% bow_norm_nonzero]
+
+bow_nonzero_unique_ens <- gsub("_.*","",bow_norm_nonzero_unique)
+star_nonzero_unique_ens <- gsub("_.*","",star_norm_nonzero_unique)
+
+bow_nonzero_gene <- biomart_105[biomart_105$id %in% bow_nonzero_unique_ens,]
+star_nonzero_gene <- biomart_105[biomart_105$id %in% star_nonzero_unique_ens,]
+
+table(bow_nonzero_gene$chromosome)
+table(star_nonzero_gene$chromosome)
+
+# bow_gene_tot <- bow_norm_counts[which(rownames(bow_norm_counts) %in% bow_norm_nonzero_unique), ]
+# star_gene_tot <- star_norm_counts[which(rownames(star_norm_counts) %in% star_norm_nonzero_unique), ]
+# 
+# bow_gene_tot <- bow_gene_tot %>% as.data.frame() %>% dplyr::mutate(totals = rowSums(bow_gene_tot))
+# star_gene_tot <- star_gene_tot %>% as.data.frame() %>% dplyr::mutate(totals = rowSums(star_gene_tot))
+
+```
+
+## Summary
+### PCA
+The principal component analysis shows the same results as for the full length STAR mapping and the EMASE/GBRS bowtie mapping.
+
+### Correlation
+The sample outliers are all liver samples from DO mice. But the correlation mismatch does not seem to be very extreme when looking at the rank sum correlations.
+For the differences in mapping genes, there are 2247 genes (~ 5.5%) that are identified by Bowtie2 which are not identified by STAR and 224 genes (~ 0.6%) which are identified by STAR and not Bowtie2. Of the genes mapped by Bowtie2 and not STAR only one is a mitochondrial gene and the other mapped genes are relatively evenly distributed between chromosomes.
+
+This suggests that the reason for more mitochondrial genes seen with EMASE/GBRS is due to the trimming required to run GBRS. Using the counts from the counts from STAR and the isoforms from EMASE/GBRS still makes the most sense.

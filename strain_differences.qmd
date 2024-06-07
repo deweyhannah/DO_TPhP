@@ -1,0 +1,3427 @@
+---
+title: "Strain Questions"
+author: "Hannah Dewey"
+date: "`r Sys.Date()`"
+format: 
+  html:
+    self-contained: true
+    embed-resources: true
+code-fold: true
+toc: true
+---
+
+Answering 3 questions about differences between the F1 and DO mice at different doses
+
+```{r setup}
+#| message: false
+library(ggpubr)
+library(rstatix)
+library(RColorBrewer)
+library(reshape2)
+library(GGally)
+library(gprofiler2)
+# set_base_url("https://biit.cs.ut.ee/gprofiler_archive3/e105_eg52_p16/")
+library(DEGreport)
+library(DESeq2)
+library(tidyverse)
+
+create_dt <- function(x){
+  DT::datatable(x,
+                extensions = 'Buttons',
+                rownames = FALSE, 
+                filter="top",
+                options = list(dom = 'Blfrtip',
+                               buttons = c('copy', 'csv', 'excel'),
+                               pageLength = 5, 
+                               scrollX= TRUE
+                               ))
+
+}
+
+select <- dplyr::select # I am adding this explicitly
+rename <- dplyr::rename # I am adding this explicitly
+filter <- dplyr::filter
+mutate <- dplyr::mutate
+```
+
+```{r load_in}
+#| cache: true
+#| message: false
+#| warning: false
+
+#### Load in and manipulate data for plotting ####
+## read in filtered and normalized data
+norm_filt_counts_kd <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/star_normalized_counts_filtered_kd_all.txt")
+norm_filt_counts_lv <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/star_normalized_counts_filtered_lv_all.txt")
+
+## Set up sample table
+rownames(norm_filt_counts_lv) <- gsub('_.*','',rownames(norm_filt_counts_lv))
+rownames(norm_filt_counts_kd) <- gsub('_.*','',rownames(norm_filt_counts_kd))
+
+sample_meta <- read.csv("/projects/munger-lab/projects/DO_TPhP/data/TPhPpath2fastqs.csv", header=T, stringsAsFactors = F)
+
+sample_split <- colsplit(colnames(norm_filt_counts_kd),"_",c("tissue","mouse_number"))
+
+sample_table<- as.data.frame(colnames(norm_filt_counts_kd))
+colnames(sample_table) <- "ID"
+sample_table$tissue <- "kidney"
+sample_table$tissue[which(sample_split$tissue=="Lv")] <- "liver"
+sample_table$mouse <- sample_split$mouse_number
+
+sample_table<- merge(sample_table, sample_meta[,c("Mouse..", "Sex","Strain", "Dose..mg.kg.","batch_number")], by.x="mouse", by.y="Mouse..", all.x = T)
+colnames(sample_table) <- c("mouse","ID","tissue","sex","strain","dose","batch")
+
+sample_table <- sample_table[,c("ID","mouse","sex","strain","dose","batch","tissue")]
+rownames(sample_table) <- sample_table$ID
+
+## Convert data to a long format and join to the sample table
+norm_filt_counts_kd$gene <- rownames(norm_filt_counts_kd)
+norm_filt_counts_lv$gene <- rownames(norm_filt_counts_lv)
+lv_filt_long <- norm_filt_counts_lv %>% pivot_longer(cols = 1:288) %>% left_join(sample_table, by=c("name"="ID"))
+kd_filt_long <- norm_filt_counts_kd %>% pivot_longer(cols = 1:288) %>% left_join(sample_table, by=c("name"="ID"))
+
+lv_filt_long$dose <- as.factor(lv_filt_long$dose)
+kd_filt_long$dose <- as.factor(kd_filt_long$dose)
+lv_filt_long$sex <- as.factor(lv_filt_long$sex)
+kd_filt_long$sex <- as.factor(kd_filt_long$sex)
+
+kd_filt_long$strain[which(kd_filt_long$strain == "B6C3F1/J")] <- "F1"
+lv_filt_long$strain[which(lv_filt_long$strain == "B6C3F1/J")] <- "F1"
+
+lv_filt_long$strain <- as.factor(lv_filt_long$strain)
+kd_filt_long$strain <- as.factor(kd_filt_long$strain)
+
+sample_table$dose <- as.factor(sample_table$dose)
+
+## Pull driver gene lists
+lv_strain_drivers <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/lv_pc3_driver_symbols.txt", header = F, stringsAsFactors = F)
+kd_strain_drivers <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/kd_pc3_driver_symbols.txt", header = F, stringsAsFactors = F)
+
+lv_strain_drivers <- as.data.frame(lv_strain_drivers)
+kd_strain_drivers <- as.data.frame(kd_strain_drivers)
+
+colnames(lv_strain_drivers) <- "symbol"
+colnames(kd_strain_drivers) <- "symbol"
+
+biomart_105 <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/biomart_v105.txt", stringsAsFactors = F)
+colnames(biomart_105) <- c("gene","gene_version","start","stop","type","chromosome","symbol")
+
+biomart_lv_sub <- biomart_105 %>% dplyr::filter(symbol %in% lv_strain_drivers$symbol)
+biomart_kd_sub <- biomart_105 %>% dplyr::filter(symbol %in% kd_strain_drivers$symbol)
+
+lv_strain_drivers <- lv_strain_drivers %>% left_join(biomart_lv_sub %>% dplyr::select(gene,symbol))
+kd_strain_drivers <- kd_strain_drivers %>% left_join(biomart_kd_sub %>% dplyr::select(gene,symbol))
+
+## Read in ART-ANOVA terms
+lv_art_terms <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/lv_art_terms.txt", stringsAsFactors = F)
+kd_art_terms <- read.delim("/projects/munger-lab/projects/DO_TPhP/data/kd_art_terms.txt", stringsAsFactors = F)
+
+## Set colors to use for plotting
+sex_colors <- c("F"="magenta","M"="dodgerblue")
+strain_colors <- c("F1" = "orange", "DO"="purple", "B6C3F1/J" = "orange")
+doses <- brewer.pal(5,"Dark2")
+dose_colors <- c("0"=doses[1], "1"=doses[2], "10"=doses[3], "100"=doses[4], "500"=doses[5])
+
+```
+
+# Question 1
+Is there more variation in gene expression in response to the triphenyl phosphate in the DO in comparison to the F1s?
+
+::: {.panel-tabset .nav-pills}
+
+## Overall Gene Set Comparison
+
+::: {.panel-tabset .nav-pills}
+
+### Density Comparisons
+
+::: {.panel-tabset .nav-pills}
+
+#### Kidney
+```{r overall_dose_strain_kd}
+#| cache: true
+#| warning: false
+#| message: false
+
+## Look at the differences of density distributions between the DO and F1 mice at each dose of TPhP
+ks.stat.test.kd <- data.frame(matrix(0, nrow = 5, ncol = 6))
+colnames(ks.stat.test.kd) <- c("dose", ".y.", "group1", "group2", "statistic", "p")
+ks.stat.test.kd$dose <- levels(kd_filt_long$dose)
+ks.stat.test.kd$.y. <- "value"
+ks.stat.test.kd$group1 <- "DO"
+ks.stat.test.kd$group2 <- "F1"
+
+for(dose in levels(kd_filt_long$dose)){
+  message(dose)
+  ks_out <- kd_filt_long %>% dplyr::filter(tissue == "kidney") %>% 
+    dplyr::filter(dose == dose) %>% 
+    ks.test(formula = value ~ strain, data = .)
+  ks.stat.test.kd$statistic[which(ks.stat.test.kd$dose == dose)] <- as.numeric(ks_out$statistic)
+  ks.stat.test.kd$p[which(ks.stat.test.kd$dose == dose)] <- as.numeric(ks_out$p.value)
+}
+ks.stat.test.kd <- ks.stat.test.kd %>% as_tibble %>% adjust_pvalue(method = "bonferroni") %>%
+  add_significance()
+
+kd_filt_long$strain <- factor(kd_filt_long$strain, levels = c("F1","DO"))
+
+kd_filt_long %>% dplyr::filter(tissue == "kidney") %>%
+  ggplot(aes(x = log(value), fill = strain)) + 
+  facet_wrap("dose", nrow = 5) +
+  geom_density(alpha = 0.2) +
+  scale_fill_manual(values = strain_colors) +
+  ggtitle("Kidney expression Density") +
+  theme_pubclean()
+
+## Look at dose expression density distribution for DO only
+kd_filt_long %>% dplyr::filter(tissue == "kidney", strain == "DO") %>%
+  ggplot(aes(x = log(value), fill = dose)) + 
+  # facet_wrap("dose", nrow = 5) +
+  geom_density(alpha = 0.2) +
+  scale_fill_manual(values = dose_colors) +
+  ggtitle("Kidney expression Density") +
+  theme_pubclean()
+
+## Look at strain expression density for unexposed mice
+kd_filt_long %>% dplyr::filter(tissue == "kidney", dose == 0) %>%
+  ggplot(aes(x = log(value), fill = strain)) + 
+  facet_wrap(c("strain","sex"), nrow = 2) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = strain_colors) +
+  ggtitle("Kidney expression Density") +
+  theme_pubclean()
+
+kd_filt_long %>% dplyr::filter(tissue == "kidney") %>% 
+  rstatix::group_by(dose) %>% 
+  levene_test(value ~ strain)
+
+## Test for equality of variances when sampling form independent normal distribution
+# shapiro.test(as.data.frame(kd_filt_long)[which(kd_filt_long$tissue == "kidney" & kd_filt_long$dose == 0 & kd_filt_long$strain == "DO"), "value"])
+qqnorm(log1p(as.data.frame(kd_filt_long)[which(kd_filt_long$tissue == "kidney" & kd_filt_long$dose == 0 & kd_filt_long$strain == "DO"), "value"]))
+qqnorm(log1p(as.data.frame(kd_filt_long)[which(kd_filt_long$tissue == "kidney" & kd_filt_long$dose == 0 & kd_filt_long$strain == "F1"), "value"]))
+
+var.test(log1p(as.data.frame(kd_filt_long)[which(kd_filt_long$tissue == "kidney" & kd_filt_long$dose == 0 & kd_filt_long$strain == "F1"), "value"]),
+         log1p(as.data.frame(kd_filt_long)[which(kd_filt_long$tissue == "kidney" & kd_filt_long$dose == 0 & kd_filt_long$strain == "DO"), "value"]),
+         alternative = "less")
+
+car::leveneTest(value~strain, data = as.data.frame(kd_filt_long)[which(kd_filt_long$tissue=="kidney" & kd_filt_long$dose==0),])
+
+```
+
+#### Liver
+```{r overall_dose_strain_lv}
+#| cache: true
+#| warning: false
+#| message: false
+
+## Look at the differences of density distributions between the DO and F1 mice at each dose of TPhP
+## Liver
+ks.stat.test.lv <- data.frame(matrix(0, nrow = 5, ncol = 6))
+colnames(ks.stat.test.lv) <- c("dose", ".y.", "group1", "group2", "statistic", "p")
+ks.stat.test.lv$dose <- levels(kd_filt_long$dose)
+ks.stat.test.lv$.y. <- "value"
+ks.stat.test.lv$group1 <- "DO"
+ks.stat.test.lv$group2 <- "F1"
+
+for(dose in levels(lv_filt_long$dose)){
+  message(dose)
+  ks_out <- lv_filt_long %>% dplyr::filter(tissue == "liver") %>% 
+    dplyr::filter(dose == dose) %>% 
+    ks.test(formula = log(value) ~ strain, data = .)
+  ks.stat.test.lv$statistic[which(ks.stat.test.lv$dose == dose)] <- as.numeric(ks_out$statistic)
+  ks.stat.test.lv$p[which(ks.stat.test.lv$dose == dose)] <- as.numeric(ks_out$p.value)
+}
+ks.stat.test.lv <- ks.stat.test.lv %>% as_tibble %>% adjust_pvalue(method = "bonferroni") %>%
+  add_significance()
+
+lv_filt_long$strain <- factor(lv_filt_long$strain, levels = c("F1","DO"))
+
+lv_filt_long %>% dplyr::filter(tissue == "liver") %>%
+  ggplot(aes(x = log(value), fill = strain)) + 
+  facet_wrap("dose", nrow = 5) +
+  geom_density(alpha = 0.2) +
+  scale_fill_manual(values = strain_colors) +
+  ggtitle("Liver expression Density") +
+  theme_pubclean()
+
+## Look at dose expression density distribution for DO only
+lv_filt_long %>% dplyr::filter(tissue == "liver", strain == "DO") %>%
+  ggplot(aes(x = log(value), fill = dose)) + 
+  # facet_wrap("dose", nrow = 5) +
+  geom_density(alpha = 0.2) +
+  scale_fill_manual(values = dose_colors) +
+  ggtitle("Liver expression Density") +
+  theme_pubclean()
+
+## Look at strain expression density for unexposed mice
+lv_filt_long %>% dplyr::filter(tissue == "liver", dose == 0) %>%
+  ggplot(aes(x = log(value), fill = strain)) + 
+  facet_wrap(c("strain","sex"), nrow = 2) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = strain_colors) +
+  ggtitle("Liver expression Density") +
+  theme_pubclean()
+
+lv_filt_long %>% dplyr::filter(tissue == "liver") %>% 
+  rstatix::group_by(dose) %>% 
+  levene_test(value ~ strain)
+
+## Test for equality of variances when sampling form independent normal distribution
+# shapiro.test(as.data.frame(kd_filt_long)[which(kd_filt_long$tissue == "kidney" & kd_filt_long$dose == 0 & kd_filt_long$strain == "DO"), "value"])
+
+qqnorm(log1p(as.data.frame(lv_filt_long)[which(lv_filt_long$tissue == "liver" & lv_filt_long$dose == 0 & lv_filt_long$strain == "DO"), "value"]))
+qqnorm(log1p(as.data.frame(lv_filt_long)[which(lv_filt_long$tissue == "liver" & lv_filt_long$dose == 0 & lv_filt_long$strain == "F1"), "value"]))
+
+var.test(log1p(as.data.frame(lv_filt_long)[which(lv_filt_long$tissue == "liver" & lv_filt_long$dose == 0 & lv_filt_long$strain == "F1"), "value"]),
+         log1p(as.data.frame(lv_filt_long)[which(lv_filt_long$tissue == "liver" & lv_filt_long$dose == 0 & lv_filt_long$strain == "DO"), "value"]),
+         alternative = "less")
+
+car::leveneTest(value~strain, data = as.data.frame(lv_filt_long)[which(lv_filt_long$tissue=="liver" & lv_filt_long$dose==0),])
+
+```
+
+:::
+
+**Conclusion:**
+For each tissue the dose/strain populations each come from a different continuous population (two sided ks test). However, the variances between the different populations are the same (levene test). By the `var.test` the variance of F1 untreated expression is less than the variance of DO untreated, however the data is far from normal.
+
+### CV Analysis
+
+Doing a Coefficients of variation analysis between F1 and DO. Plots made for kidney and liver, looking at mean, variance, and coefficient of variance.
+```{r cv_analysis}
+#| cache: true
+#| message: false
+#| warning: false
+
+## Put samples into transposed format, with samples as rows and genes as columns. Select for each strain/tissue combination.
+kd_do_samp_by_gene <- norm_filt_counts_kd %>% dplyr::select(sample_table$ID[which(sample_table$strain=="DO" & sample_table$tissue=="kidney")]) %>% t()
+lv_do_samp_by_gene <- norm_filt_counts_lv %>% dplyr::select(sample_table$ID[which(sample_table$strain=="DO" & sample_table$tissue=="liver")]) %>% t()
+kd_f1_samp_by_gene <- norm_filt_counts_kd %>% dplyr::select(sample_table$ID[which(sample_table$strain=="B6C3F1/J" & sample_table$tissue=="kidney")]) %>% t()
+lv_f1_samp_by_gene <- norm_filt_counts_lv %>% dplyr::select(sample_table$ID[which(sample_table$strain=="B6C3F1/J" & sample_table$tissue=="liver")]) %>% t()
+
+## Calculate the stats
+## Variance
+var.kd_do <- kd_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.lv_do <- lv_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.kd_f1 <- kd_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.lv_f1 <- lv_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+## N
+n.kd_do <- kd_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ sum(!is.na(.)))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, n = V1) %>% 
+  arrange(desc(n))
+
+n.lv_do <- lv_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ sum(!is.na(.)))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, n = V1) %>% 
+  arrange(desc(n))
+
+n.kd_f1 <- kd_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ sum(!is.na(.)))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, n = V1) %>% 
+  arrange(desc(n))
+
+n.lv_f1 <- lv_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ sum(!is.na(.)))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, n = V1) %>% 
+  arrange(desc(n))
+
+## Mean
+mean.kd_do <- kd_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_do <- lv_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.kd_f1 <- kd_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_f1 <- lv_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+## Median Absolute Deviation
+mad.kd_do <- kd_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.lv_do <- lv_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.kd_f1 <- kd_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.lv_f1 <- lv_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+## Put everything together for each strain/tissue combo
+var.kd_do <- inner_join(var.kd_do, mean.kd_do) %>% 
+  inner_join(., n.kd_do) %>% 
+  inner_join(., mad.kd_do) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.kd_do = 100*sd/mean) %>%
+  dplyr::mutate(npcv.kd_do = 100*mad/abs(mean)) %>% 
+  rename(mean.kd_do = mean, sd.kd_do = sd, n.kd_do = n, var.kd_do = var, mad.kd_do = mad)
+
+var.lv_do <- inner_join(var.lv_do, mean.lv_do) %>% 
+  inner_join(., n.lv_do) %>% 
+  inner_join(., mad.lv_do) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.lv_do = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.lv_do = 100*mad/abs(mean)) %>%
+  rename(mean.lv_do = mean, sd.lv_do = sd, n.lv_do = n, var.lv_do = var, mad.lv_do = mad)
+
+var.kd_f1 <- inner_join(var.kd_f1, mean.kd_f1) %>% 
+  inner_join(., n.kd_f1) %>% 
+  inner_join(., mad.kd_f1) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.kd_f1 = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.kd_f1 = 100*mad/abs(mean)) %>%
+  rename(mean.kd_f1 = mean, sd.kd_f1 = sd, n.kd_f1 = n, var.kd_f1 = var, mad.kd_f1 = mad)
+
+var.lv_f1 <- inner_join(var.lv_f1, mean.lv_f1) %>% 
+  inner_join(., n.lv_f1) %>% 
+  inner_join(., mad.lv_f1) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.lv_f1 = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.lv_f1 = 100*mad/abs(mean)) %>%
+  rename(mean.lv_f1 = mean, sd.lv_f1 = sd, n.lv_f1 = n, var.lv_f1 = var, mad.lv_f1 = mad)
+```
+
+::: {.panel-tabset .nav-pills}
+
+#### Kidney
+```{r cv_kidney}
+#| warning: false
+#| message: false
+#| results: asis
+#| cache: true
+
+## Plotting
+## Kidney
+## mean do vs f1
+var.kd_do %>% inner_join(var.kd_f1) %>% 
+  ggplot(aes(x = mean.kd_do, y = mean.kd_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1") +
+  ggtitle("Mean transcipt abundance - Whole Gene Set")
+
+## variance do vs f1
+var.kd_do %>% inner_join(var.kd_f1) %>% 
+  ggplot(aes(x = var.kd_do, y = var.kd_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1")+
+  ggtitle("Variance in transcipt abundance - Whole Gene Set")
+
+## CV do vs f1
+var.kd_do %>% inner_join(var.kd_f1) %>% 
+  ggplot(aes(x = npcv.kd_do, y = npcv.kd_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1")+
+  ggtitle("%CV (non-parametric) in transcipt abundance - Whole Gene Set")
+
+var.kd_do %>% inner_join(var.kd_f1) %>% 
+  dplyr::mutate(high_do = if_else(npcv.kd_do - npcv.kd_f1 > 15, "yes","no")) %>% 
+  pivot_longer(cols = c(npcv.kd_do, npcv.kd_f1)) %>% 
+  select(ensembl_gene_id, name, value, high_do) %>% 
+  rename(strain = name, npcv = value) %>% 
+  dplyr::mutate(strain = replace(strain, strain == "npcv.kd_do", "DO")) %>% 
+  dplyr::mutate(strain = replace(strain, strain == "npcv.kd_f1", "F1")) %>% 
+  ggplot(aes(x = strain, y = log(npcv), fill = strain)) +
+  geom_point(aes(color = high_do)) +
+  geom_line(aes(group = ensembl_gene_id, color = high_do), alpha = 0.05) +
+  geom_violin(alpha = 0.5) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  scale_fill_manual(values = strain_colors) +
+  scale_color_manual(values = c("yes" = "red", "no" = "black")) +
+  ggtitle("%CV (non-parametric) comparison - Whole Gene Set") +
+  theme_pubclean()
+```
+
+#### Liver
+```{r cv_liver}
+#| warning: false
+#| message: false
+#| results: asis
+#| cache: true
+
+## Liver
+## mean do vs f1
+var.lv_do %>% inner_join(var.lv_f1) %>% 
+  ggplot(aes(x = mean.lv_do, y = mean.lv_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1") +
+  ggtitle("Mean transcipt abundance - Whole Gene Set")
+
+## variance do vs f1
+var.lv_do %>% inner_join(var.lv_f1) %>% 
+  ggplot(aes(x = var.lv_do, y = var.lv_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1")+
+  ggtitle("Variance in transcipt abundance - Whole Gene Set")
+
+## CV do vs f1
+var.lv_do %>% inner_join(var.lv_f1) %>% 
+  ggplot(aes(x = npcv.lv_do, y = npcv.lv_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1")+
+  ggtitle("%CV (non-parametric) in transcipt abundance - Whole Gene Set")
+
+## Side by side box plots looking at the changes in variance and highlighting the ones where DO has a higher %CV.
+## Highlighting the genes where the DO gene is > 15% higher variance
+var.lv_do %>% inner_join(var.lv_f1) %>% 
+  dplyr::mutate(high_do = if_else(npcv.lv_do - npcv.lv_f1 > 15, "yes","no")) %>% 
+  pivot_longer(cols = c(npcv.lv_do, npcv.lv_f1)) %>% 
+  select(ensembl_gene_id, name, value, high_do) %>% 
+  rename(strain = name, npcv = value) %>% 
+  dplyr::mutate(strain = replace(strain, strain == "cv.lv_do", "DO")) %>% 
+  dplyr::mutate(strain = replace(strain, strain == "cv.lv_f1", "F1")) %>% 
+  ggplot(aes(x = strain, y = log(npcv), fill = strain)) +
+  geom_point(aes(color = high_do)) +
+  geom_line(aes(group = ensembl_gene_id, color = high_do), alpha = 0.05) +
+  geom_violin(alpha = 0.5) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  scale_fill_manual(values = strain_colors) +
+  scale_color_manual(values = c("yes" = "red", "no" = "black")) +
+  ggtitle("%CV (non-parametric) comparison - Whole Gene Set") +
+  theme_pubclean()
+```
+
+:::
+
+**Conclusion:**
+There is more variance in the transcript abundance of the DO for both Kidney and Liver.
+
+:::
+
+## PC3 (Strain) Driver Comparison
+
+::: {.panel-tabset .nav-pills}
+
+### Density Comparison
+
+::: {.panel-tabset .nav-pills}
+
+#### Kidney
+```{r strain_density_kd}
+#| warning: false
+#| message: false
+#| cache: true
+#| fig-width: 8
+#| fig-height: 12
+
+kd_filt_long$strain <- factor(kd_filt_long$strain, levels = c("F1","DO"))
+
+kd_filt_long %>% dplyr::filter(tissue == "kidney", gene %in% kd_strain_drivers$gene) %>%
+  ggplot(aes(x = log(value), fill = strain)) + 
+  facet_wrap("dose", nrow = 5) +
+  geom_density(alpha = 0.2) +
+  scale_fill_manual(values = strain_colors) +
+  ggtitle("Kidney expression Density - PC3 Driver Genes") +
+  theme_pubclean()
+  
+## Look at dose expression density distribution for DO only
+kd_filt_long %>% dplyr::filter(tissue == "kidney", strain == "DO", gene %in% kd_strain_drivers$gene) %>%
+  ggplot(aes(x = log(value), fill = dose)) + 
+  # facet_wrap("dose", nrow = 5) +
+  geom_density(alpha = 0.2) +
+  scale_fill_manual(values = dose_colors) +
+  ggtitle("Kidney expression Density - PC3 Driver Genes - All Doses") +
+  theme_pubclean()
+
+kd_filt_long %>% dplyr::filter(tissue == "kidney", gene %in% kd_strain_drivers$gene, dose == 0) %>%
+  ggplot(aes(x = log(value), color = strain)) + 
+  facet_wrap("dose", nrow = 5) +
+  geom_density(alpha = 0.2) +
+  scale_color_manual(values = strain_colors) +
+  ggtitle("Kidney expression Density - PC3 Driver Genes - Unexposed") +
+  theme_pubclean()
+
+## Look at strain expression density for unexposed mice
+kd_filt_long %>% dplyr::filter(tissue == "kidney", dose == 0, gene %in% kd_strain_drivers$gene) %>%
+  ggplot(aes(x = log(value), fill = strain)) + 
+  facet_wrap(c("strain","sex"), nrow = 2) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = strain_colors) +
+  ggtitle("Kidney expression Density - PC3 Driver Genes - Unexposed") +
+  theme_pubclean()
+
+kd_filt_long %>% dplyr::filter(tissue == "kidney", gene %in% kd_strain_drivers$gene) %>% 
+  rstatix::group_by(dose) %>% 
+  levene_test(value ~ strain)
+
+## Test for equality of variances when sampling form independent normal distribution
+shapiro.test(as.data.frame(kd_filt_long)[which(kd_filt_long$tissue == "kidney" & kd_filt_long$dose == 0 & kd_filt_long$strain == "DO" & kd_filt_long$gene %in% kd_strain_drivers$gene), "value"])
+qqnorm(log1p(as.data.frame(kd_filt_long)[which(kd_filt_long$tissue == "kidney" & kd_filt_long$dose == 0 & kd_filt_long$strain == "DO" & kd_filt_long$gene %in% kd_strain_drivers$gene), "value"]))
+qqnorm(log1p(as.data.frame(kd_filt_long)[which(kd_filt_long$tissue == "kidney" & kd_filt_long$dose == 0 & kd_filt_long$strain == "F1" & kd_filt_long$gene %in% kd_strain_drivers$gene), "value"]))
+
+var.test(log1p(as.data.frame(kd_filt_long)[which(kd_filt_long$tissue == "kidney" & kd_filt_long$dose == 0 & kd_filt_long$strain == "F1" & kd_filt_long$gene %in% kd_strain_drivers$gene), "value"]),
+         log1p(as.data.frame(kd_filt_long)[which(kd_filt_long$tissue == "kidney" & kd_filt_long$dose == 0 & kd_filt_long$strain == "DO" & kd_filt_long$gene %in% kd_strain_drivers$gene), "value"]),
+         alternative = "less")
+
+car::leveneTest(value~strain, data = as.data.frame(kd_filt_long)[which(kd_filt_long$tissue=="kidney" & kd_filt_long$dose==0 & kd_filt_long$gene %in% kd_strain_drivers$gene),])
+
+```
+
+#### Liver
+```{r strain_density_lv}
+#| warning: false
+#| message: false
+#| cache: true
+#| fig-width: 8
+#| fig-height: 12
+
+lv_filt_long$strain <- factor(lv_filt_long$strain, levels = c("F1","DO"))
+
+lv_filt_long %>% dplyr::filter(tissue == "liver", gene %in% lv_strain_drivers$gene) %>%
+  ggplot(aes(x = log(value), color = strain)) + 
+  facet_wrap("dose", nrow = 5) +
+  geom_density(alpha = 0.2) +
+  scale_color_manual(values = strain_colors) +
+  ggtitle("Liver expression Density - PC3 Driver Genes") +
+  theme_pubclean()
+
+## Look at dose expression density distribution for DO only
+lv_filt_long %>% dplyr::filter(tissue == "liver", strain == "DO", gene %in% lv_strain_drivers$gene) %>%
+  ggplot(aes(x = log(value), fill = dose)) + 
+  # facet_wrap("dose", nrow = 5) +
+  geom_density(alpha = 0.2) +
+  scale_fill_manual(values = dose_colors) +
+  ggtitle("Liver expression Density - PC3 Driver Genes - All Doses") +
+  theme_pubclean()
+
+lv_filt_long %>% dplyr::filter(tissue == "liver", gene %in% lv_strain_drivers$gene, dose == 0) %>%
+  ggplot(aes(x = log(value), color = strain)) + 
+  facet_wrap("dose", nrow = 5) +
+  geom_density(alpha = 0.2) +
+  scale_color_manual(values = strain_colors) +
+  ggtitle("Liver expression Density - PC3 Driver Genes - Unexposed") +
+  theme_pubclean()
+
+## Look at strain expression density for unexposed mice
+lv_filt_long %>% dplyr::filter(tissue == "liver", dose == 0, gene %in% lv_strain_drivers$gene) %>%
+  ggplot(aes(x = log(value), fill = strain)) + 
+  facet_wrap(c("strain","sex"), nrow = 2) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = strain_colors) +
+  ggtitle("Liver expression Density - PC3 Driver Genes - Unexposed") +
+  theme_pubclean()
+
+lv_filt_long %>% dplyr::filter(tissue == "liver", gene %in% lv_strain_drivers$gene) %>% 
+  rstatix::group_by(dose) %>% 
+  levene_test(value ~ strain)
+
+## Test for equality of variances when sampling form independent normal distribution
+shapiro.test(as.data.frame(lv_filt_long)[which(lv_filt_long$tissue == "liver" & lv_filt_long$dose == 0 & lv_filt_long$strain == "DO" & lv_filt_long$gene %in% lv_strain_drivers$gene), "value"])
+qqnorm(log1p(as.data.frame(lv_filt_long)[which(lv_filt_long$tissue == "liver" & lv_filt_long$dose == 0 & lv_filt_long$strain == "DO" & lv_filt_long$gene %in% lv_strain_drivers$gene), "value"]))
+qqnorm(log1p(as.data.frame(lv_filt_long)[which(lv_filt_long$tissue == "liver" & lv_filt_long$dose == 0 & lv_filt_long$strain == "F1" & lv_filt_long$gene %in% lv_strain_drivers$gene), "value"]))
+
+var.test(log1p(as.data.frame(kd_filt_long)[which(kd_filt_long$tissue == "kidney" & kd_filt_long$dose == 0 & kd_filt_long$strain == "F1" & kd_filt_long$gene %in% kd_strain_drivers$gene), "value"]),
+         log1p(as.data.frame(kd_filt_long)[which(kd_filt_long$tissue == "kidney" & kd_filt_long$dose == 0 & kd_filt_long$strain == "DO" & kd_filt_long$gene %in% kd_strain_drivers$gene), "value"]),
+         alternative = "less")
+
+car::leveneTest(value~strain, data = as.data.frame(kd_filt_long)[which(kd_filt_long$tissue=="kidney" & kd_filt_long$dose==0 & kd_filt_long$gene %in% kd_strain_drivers$gene),])
+```
+
+:::
+
+### CV Analysis
+Doing a Coefficients of variation analysis between F1 and DO. Plots made for kidney and liver, looking at mean, variance, and coefficient of variance. Specifically for PC3 Driver Genes and for all mice.
+```{r strain_cv}
+#| cache: true
+#| message: false
+#| warning: false
+
+## Put samples into transposed format, with samples as rows and genes as columns. Select for each strain/tissue combination.
+kd_do_samp_by_gene <- norm_filt_counts_kd %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="DO" & sample_table$tissue=="kidney")]) %>%
+  t() %>% as.data.frame() %>% 
+  dplyr::select(kd_strain_drivers$gene)
+
+lv_do_samp_by_gene <- norm_filt_counts_lv %>%
+  dplyr::select(sample_table$ID[which(sample_table$strain=="DO" & sample_table$tissue=="liver")]) %>%
+  t() %>% as.data.frame() %>%
+  dplyr::select(lv_strain_drivers$gene)
+
+kd_f1_samp_by_gene <- norm_filt_counts_kd %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="B6C3F1/J" & sample_table$tissue=="kidney")]) %>% 
+  t() %>% as.data.frame() %>%
+  dplyr::select(kd_strain_drivers$gene)
+
+lv_f1_samp_by_gene <- norm_filt_counts_lv %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="B6C3F1/J" & sample_table$tissue=="liver")]) %>% 
+  t() %>% as.data.frame() %>%
+  dplyr::select(lv_strain_drivers$gene)
+
+## Calculate the stats
+## Variance
+var.kd_do <- kd_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.lv_do <- lv_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.kd_f1 <- kd_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.lv_f1 <- lv_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+## N
+n.kd_do <- kd_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ sum(!is.na(.)))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, n = V1) %>% 
+  arrange(desc(n))
+
+n.lv_do <- lv_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ sum(!is.na(.)))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, n = V1) %>% 
+  arrange(desc(n))
+
+n.kd_f1 <- kd_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ sum(!is.na(.)))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, n = V1) %>% 
+  arrange(desc(n))
+
+n.lv_f1 <- lv_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ sum(!is.na(.)))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, n = V1) %>% 
+  arrange(desc(n))
+
+## Mean
+mean.kd_do <- kd_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_do <- lv_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.kd_f1 <- kd_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_f1 <- lv_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.kd_do <- kd_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_do <- lv_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.kd_f1 <- kd_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_f1 <- lv_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+## Median Absolute Deviation
+mad.kd_do <- kd_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.lv_do <- lv_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.kd_f1 <- kd_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.lv_f1 <- lv_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+## Put everything together for each strain/tissue combo
+var.kd_do <- inner_join(var.kd_do, mean.kd_do) %>% 
+  inner_join(., n.kd_do) %>% 
+  inner_join(., mad.kd_do) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.kd_do = 100*sd/mean) %>%
+  dplyr::mutate(npcv.kd_do = 100*mad/abs(mean)) %>% 
+  rename(mean.kd_do = mean, sd.kd_do = sd, n.kd_do = n, var.kd_do = var, mad.kd_do = mad)
+
+var.lv_do <- inner_join(var.lv_do, mean.lv_do) %>% 
+  inner_join(., n.lv_do) %>% 
+  inner_join(., mad.lv_do) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.lv_do = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.lv_do = 100*mad/abs(mean)) %>%
+  rename(mean.lv_do = mean, sd.lv_do = sd, n.lv_do = n, var.lv_do = var, mad.lv_do = mad)
+
+var.kd_f1 <- inner_join(var.kd_f1, mean.kd_f1) %>% 
+  inner_join(., n.kd_f1) %>% 
+  inner_join(., mad.kd_f1) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.kd_f1 = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.kd_f1 = 100*mad/abs(mean)) %>%
+  rename(mean.kd_f1 = mean, sd.kd_f1 = sd, n.kd_f1 = n, var.kd_f1 = var, mad.kd_f1 = mad)
+
+var.lv_f1 <- inner_join(var.lv_f1, mean.lv_f1) %>% 
+  inner_join(., n.lv_f1) %>% 
+  inner_join(., mad.lv_f1) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.lv_f1 = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.lv_f1 = 100*mad/abs(mean)) %>%
+  rename(mean.lv_f1 = mean, sd.lv_f1 = sd, n.lv_f1 = n, var.lv_f1 = var, mad.lv_f1 = mad)
+```
+
+::: {.panel-tabset .nav-pills}
+
+#### Kidney
+```{r strain_cv_kidney}
+#| warning: false
+#| message: false
+#| results: asis
+#| cache: true
+
+## Plotting
+## Kidney
+## mean do vs f1
+var.kd_do %>% inner_join(var.kd_f1) %>% 
+  ggplot(aes(x = mean.kd_do, y = mean.kd_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1") +
+  ggtitle("Mean transcipt abundance - PC3 Driver Genes")
+
+## variance do vs f1
+var.kd_do %>% inner_join(var.kd_f1) %>% 
+  ggplot(aes(x = var.kd_do, y = var.kd_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1")+
+  ggtitle("Variance in transcipt abundance - PC3 Driver Genes")
+
+## CV do vs f1
+## CV do vs f1
+var.kd_do %>% inner_join(var.kd_f1) %>% 
+  ggplot(aes(x = npcv.kd_do, y = npcv.kd_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1")+
+  ggtitle("%CV (non-parametric) in transcipt abundance - PC3 Driver Genes")
+
+var.kd_do %>% inner_join(var.kd_f1) %>% 
+  dplyr::mutate(high_do = if_else(npcv.kd_do - npcv.kd_f1 > 15, "yes","no")) %>% 
+  pivot_longer(cols = c(npcv.kd_do, npcv.kd_f1)) %>% 
+  select(ensembl_gene_id, name, value, high_do) %>% 
+  rename(strain = name, npcv = value) %>% 
+  dplyr::mutate(strain = replace(strain, strain == "npcv.kd_do", "DO")) %>% 
+  dplyr::mutate(strain = replace(strain, strain == "npcv.kd_f1", "F1")) %>% 
+  ggplot(aes(x = strain, y = log(npcv), fill = strain)) +
+  geom_point(aes(color = high_do)) +
+  geom_line(aes(group = ensembl_gene_id, color = high_do), alpha = 0.05) +
+  geom_violin(alpha = 0.5) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  scale_fill_manual(values = strain_colors) +
+  scale_color_manual(values = c("yes" = "red", "no" = "black")) +
+  ggtitle("%CV (non-parametric) comparison - PC3 Driver Genes") +
+  theme_pubclean()
+```
+
+#### Liver
+```{r strain_cv_liver}
+#| warning: false
+#| message: false
+#| results: asis
+#| cache: true
+
+## Liver
+## mean do vs f1
+var.lv_do %>% inner_join(var.lv_f1) %>% 
+  ggplot(aes(x = mean.lv_do, y = mean.lv_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1") +
+  ggtitle("Mean transcipt abundance - PC3 Driver Genes")
+
+## variance do vs f1
+var.lv_do %>% inner_join(var.lv_f1) %>% 
+  ggplot(aes(x = var.lv_do, y = var.lv_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1")+
+  ggtitle("Variance in transcipt abundance - PC3 Driver Genes")
+
+## CV do vs f1
+## CV do vs f1
+var.lv_do %>% inner_join(var.lv_f1) %>% 
+  ggplot(aes(x = npcv.lv_do, y = npcv.lv_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1")+
+  ggtitle("%CV (non-parametric) in transcipt abundance - PC3 Driver Genes")
+
+## Side by side box plots looking at the changes in variance and highlighting the ones where DO has a higher %CV.
+## Highlighting the genes where the DO gene is > 15% higher variance
+var.lv_do %>% inner_join(var.lv_f1) %>% 
+  dplyr::mutate(high_do = if_else(npcv.lv_do - npcv.lv_f1 > 15, "yes","no")) %>% 
+  pivot_longer(cols = c(npcv.lv_do, npcv.lv_f1)) %>% 
+  select(ensembl_gene_id, name, value, high_do) %>% 
+  rename(strain = name, npcv = value) %>% 
+  dplyr::mutate(strain = replace(strain, strain == "cv.lv_do", "DO")) %>% 
+  dplyr::mutate(strain = replace(strain, strain == "cv.lv_f1", "F1")) %>% 
+  ggplot(aes(x = strain, y = log(npcv), fill = strain)) +
+  geom_point(aes(color = high_do)) +
+  geom_line(aes(group = ensembl_gene_id, color = high_do), alpha = 0.05) +
+  geom_violin(alpha = 0.5) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) +
+  scale_fill_manual(values = strain_colors) +
+  scale_color_manual(values = c("yes" = "red", "no" = "black")) +
+  ggtitle("%CV (non-parametric) comparison - PC3 Driver Genes") +
+  theme_pubclean()
+```
+
+:::
+
+:::
+
+## Highest CV Untreated
+Coefficients of Variance analysis between untreated F1 and DO mice. We will take the top 5% CV for each DO and F1 for each tissue. We will look for overlap between the F1 and DO gene lists, then run overrepresentation analysis on those genes.
+```{r untreated_cv}
+#| cache: true
+#| message: false
+#| warning: false
+
+## Put samples into transposed format, with samples as rows and genes as columns. Select for each strain/tissue combination.
+kd_do_samp_by_gene <- norm_filt_counts_kd %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="DO" & sample_table$tissue=="kidney" & sample_table$dose==0)]) %>%
+  t()
+
+lv_do_samp_by_gene <- norm_filt_counts_lv %>%
+  dplyr::select(sample_table$ID[which(sample_table$strain=="DO" & sample_table$tissue=="liver" & sample_table$dose==0)]) %>%
+  t()
+
+kd_f1_samp_by_gene <- norm_filt_counts_kd %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="B6C3F1/J" & sample_table$tissue=="kidney" & sample_table$dose==0)]) %>% 
+  t()
+
+lv_f1_samp_by_gene <- norm_filt_counts_lv %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="B6C3F1/J" & sample_table$tissue=="liver" & sample_table$dose==0)]) %>% 
+  t()
+
+## Calculate the stats
+## Variance
+var.kd_do <- kd_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.lv_do <- lv_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.kd_f1 <- kd_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.lv_f1 <- lv_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+## N
+n.kd_do <- kd_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ sum(!is.na(.)))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, n = V1) %>% 
+  arrange(desc(n))
+
+n.lv_do <- lv_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ sum(!is.na(.)))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, n = V1) %>% 
+  arrange(desc(n))
+
+n.kd_f1 <- kd_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ sum(!is.na(.)))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, n = V1) %>% 
+  arrange(desc(n))
+
+n.lv_f1 <- lv_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ sum(!is.na(.)))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, n = V1) %>% 
+  arrange(desc(n))
+
+## Mean
+mean.kd_do <- kd_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_do <- lv_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.kd_f1 <- kd_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_f1 <- lv_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.kd_do <- kd_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_do <- lv_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.kd_f1 <- kd_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_f1 <- lv_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+## Median Absolute Deviation
+mad.kd_do <- kd_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.lv_do <- lv_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.kd_f1 <- kd_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.lv_f1 <- lv_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+## Put everything together for each strain/tissue combo
+var.kd_do <- inner_join(var.kd_do, mean.kd_do) %>% 
+  inner_join(., n.kd_do) %>% 
+  inner_join(., mad.kd_do) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.kd_do = 100*sd/mean) %>%
+  dplyr::mutate(npcv.kd_do = 100*mad/abs(mean)) %>% 
+  rename(mean.kd_do = mean, sd.kd_do = sd, n.kd_do = n, var.kd_do = var, mad.kd_do = mad)
+
+var.lv_do <- inner_join(var.lv_do, mean.lv_do) %>% 
+  inner_join(., n.lv_do) %>% 
+  inner_join(., mad.lv_do) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.lv_do = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.lv_do = 100*mad/abs(mean)) %>%
+  rename(mean.lv_do = mean, sd.lv_do = sd, n.lv_do = n, var.lv_do = var, mad.lv_do = mad)
+
+var.kd_f1 <- inner_join(var.kd_f1, mean.kd_f1) %>% 
+  inner_join(., n.kd_f1) %>% 
+  inner_join(., mad.kd_f1) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.kd_f1 = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.kd_f1 = 100*mad/abs(mean)) %>%
+  rename(mean.kd_f1 = mean, sd.kd_f1 = sd, n.kd_f1 = n, var.kd_f1 = var, mad.kd_f1 = mad)
+
+var.lv_f1 <- inner_join(var.lv_f1, mean.lv_f1) %>% 
+  inner_join(., n.lv_f1) %>% 
+  inner_join(., mad.lv_f1) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.lv_f1 = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.lv_f1 = 100*mad/abs(mean)) %>%
+  rename(mean.lv_f1 = mean, sd.lv_f1 = sd, n.lv_f1 = n, var.lv_f1 = var, mad.lv_f1 = mad)
+
+## Add tabs for %CV analysis for each dose
+## Variance decomposition?
+## Calculate variance for each dose and look for overlaps of variability between doses
+## Calculate variance for each dose/strain and take the difference between DO and F1 and compare at each dose
+## Switch sd to median absolute deviation
+```
+
+::: {.panel-tabset .nav-pills}
+
+### Comparison of all top genes
+```{r untreated_kd}
+#| cache: true
+#| message: false
+#| warning: false
+
+var.kd_do.max <- var.kd_do %>% 
+  slice_max(npcv.kd_do, prop = 0.05)
+
+var.kd_f1.max <- var.kd_f1 %>% 
+  slice_max(npcv.kd_f1, prop = 0.05)
+
+top_5_overlap <- var.kd_do %>% 
+  slice_max(npcv.kd_do, prop = 0.05) %>% 
+  inner_join(var.kd_f1 %>% slice_max(npcv.kd_f1, prop = 0.05)) %>%
+  nrow()
+
+top_5_total <- var.kd_do %>% 
+  slice_max(npcv.kd_do, prop = 0.05) %>%
+  nrow()
+
+top_10_overlap <- var.kd_do %>% 
+  slice_max(npcv.kd_do, prop = 0.1) %>% 
+  inner_join(var.kd_f1 %>% slice_max(npcv.kd_f1, prop = 0.1)) %>%
+  nrow()
+
+top_10_total <- var.kd_do %>% 
+  slice_max(npcv.kd_do, prop = 0.1) %>%
+  nrow()
+
+top_25_overlap <- var.kd_do %>% 
+  slice_max(npcv.kd_do, prop = 0.25) %>% 
+  inner_join(var.kd_f1 %>% slice_max(npcv.kd_f1, prop = 0.25)) %>%
+  nrow()
+
+top_25_total <- var.kd_do %>% 
+  slice_max(npcv.kd_do, prop = 0.25) %>%
+  nrow()
+
+top_50_overlap <- var.kd_do %>% 
+  slice_max(npcv.kd_do, prop = 0.5) %>% 
+  inner_join(var.kd_f1 %>% slice_max(npcv.kd_f1, prop = 0.5)) %>%
+  nrow()
+
+top_50_total <- var.kd_do %>% 
+  slice_max(npcv.kd_do, prop = 0.5) %>%
+  nrow()
+
+```
+
+```{r untreated_lv}
+#| cache: true
+#| message: false
+#| warning: false
+
+var.lv_do.max <- var.lv_do %>% 
+  slice_max(npcv.lv_do, prop = 0.05)
+
+var.lv_f1.max <- var.lv_f1 %>% 
+  slice_max(npcv.lv_f1, prop = 0.05)
+
+top_5_overlap <- var.lv_do %>% 
+  slice_max(npcv.lv_do, prop = 0.05) %>% 
+  inner_join(var.lv_f1 %>% slice_max(npcv.lv_f1, prop = 0.05)) %>%
+  nrow()
+
+top_5_total <- var.lv_do %>% 
+  slice_max(npcv.lv_do, prop = 0.05) %>%
+  nrow()
+
+top_10_overlap <- var.lv_do %>% 
+  slice_max(npcv.lv_do, prop = 0.1) %>% 
+  inner_join(var.lv_f1 %>% slice_max(npcv.lv_f1, prop = 0.1)) %>%
+  nrow()
+
+top_10_total <- var.lv_do %>% 
+  slice_max(npcv.lv_do, prop = 0.1) %>%
+  nrow()
+
+top_25_overlap <- var.lv_do %>% 
+  slice_max(npcv.lv_do, prop = 0.25) %>% 
+  inner_join(var.lv_f1 %>% slice_max(npcv.lv_f1, prop = 0.25)) %>%
+  nrow()
+
+top_25_total <- var.lv_do %>% 
+  slice_max(npcv.lv_do, prop = 0.25) %>%
+  nrow()
+
+top_50_overlap <- var.lv_do %>% 
+  slice_max(npcv.lv_do, prop = 0.5) %>% 
+  inner_join(var.lv_f1 %>% slice_max(npcv.lv_f1, prop = 0.5)) %>%
+  nrow()
+
+top_50_total <- var.lv_do %>% 
+  slice_max(npcv.lv_do, prop = 0.5) %>%
+  nrow()
+```
+
+::: {.panel-tabset .nav-pills}
+
+#### Kidney
+```{r untreated_kd_top_5}
+#| cache: true
+#| message: false
+#| warning: false
+
+var.kd_do.max %>% 
+  full_join(var.kd_f1.max) %>% 
+  dplyr::rename(DO = npcv.kd_do, F1 = npcv.kd_f1) %>% 
+  dplyr::select(ensembl_gene_id, symbol, DO, F1) %>% 
+  dplyr::mutate(group = case_when(
+    is.na(DO) & !is.na(F1) ~ "F1",
+    !is.na(DO) & is.na(F1) ~ "DO",
+    !is.na(DO) & !is.na(F1) ~ "both")) %>% 
+  pivot_longer(cols = c(DO,F1)) %>% 
+  tidyr::drop_na() %>% 
+  ggplot(aes(x = name, y = value, color = group)) +
+  geom_jitter() +
+  theme_pubclean() +
+  scale_color_manual(values = c("F1" = "#FFC107", "DO" = "#1E88E5", "both" = "#D81B60")) +
+  ggtitle("Untreated - Top 5% Variable")
+
+var.kd_do.max %>% 
+  full_join(var.kd_f1.max) %>% 
+  dplyr::rename(DO = npcv.kd_do, F1 = npcv.kd_f1) %>% 
+  dplyr::select(ensembl_gene_id, symbol, DO, F1) %>% 
+  dplyr::mutate(group = case_when(
+    is.na(DO) & !is.na(F1) ~ "F1",
+    !is.na(DO) & is.na(F1) ~ "DO",
+    !is.na(DO) & !is.na(F1) ~ "both")) %>% 
+  dplyr::select(!F1) %>% 
+  tidyr::drop_na() %>% 
+  left_join(var.kd_f1 %>% select(ensembl_gene_id, symbol, npcv.kd_f1)) %>% 
+  dplyr::rename(F1 = npcv.kd_f1) %>% 
+  pivot_longer(cols = c(DO,F1)) %>% 
+  ggplot(aes(x = name, y = value, color = group)) +
+  geom_line(aes(group = ensembl_gene_id), alpha = 0.3) +
+  geom_jitter() +
+  ylim(0, NA) + 
+  theme_pubclean() +
+  scale_color_manual(values = c("F1" = "#FFC107", "DO" = "#1E88E5", "both" = "#D81B60")) +
+  ggtitle("Untreated - Top 5% Variable - DO Only")
+
+var.kd_do.max %>% 
+  full_join(var.kd_f1.max) %>% 
+  dplyr::rename(DO = npcv.kd_do, F1 = npcv.kd_f1) %>% 
+  dplyr::select(ensembl_gene_id, symbol, DO, F1) %>% 
+  dplyr::mutate(group = case_when(
+    is.na(DO) & !is.na(F1) ~ "F1",
+    !is.na(DO) & is.na(F1) ~ "DO",
+    !is.na(DO) & !is.na(F1) ~ "both")) %>% 
+  dplyr::select(!DO) %>% 
+  tidyr::drop_na() %>% 
+  left_join(var.kd_do %>% select(ensembl_gene_id, symbol, npcv.kd_do)) %>% 
+  dplyr::rename(DO = npcv.kd_do) %>% 
+  pivot_longer(cols = c(DO,F1)) %>% 
+  ggplot(aes(x = name, y = value, color = group)) +
+  geom_line(aes(group = ensembl_gene_id), alpha = 0.3) +
+  geom_jitter() +
+  ylim(0, NA) +
+  theme_pubclean() +
+  scale_color_manual(values = c("F1" = "#FFC107", "DO" = "#1E88E5", "both" = "#D81B60")) +
+  ggtitle("Untreated - Top 5% Variable - F1 Only")
+
+
+  
+```
+
+There is overlap in between the DO CVs from the genes unique to the top 5% of F1 CVs, but there is no overlap between the F1 CVs that are unique to DO mice.
+
+#### Liver
+```{r untreated_lv_top_5}
+#| cache: true
+#| message: false
+#| warning: false
+
+var.lv_do.max %>% 
+  full_join(var.lv_f1.max) %>% 
+  dplyr::rename(DO = npcv.lv_do, F1 = npcv.lv_f1) %>% 
+  dplyr::select(ensembl_gene_id, symbol, DO, F1) %>% 
+  dplyr::mutate(group = case_when(
+    is.na(DO) & !is.na(F1) ~ "F1",
+    !is.na(DO) & is.na(F1) ~ "DO",
+    !is.na(DO) & !is.na(F1) ~ "both")) %>% 
+  pivot_longer(cols = c(DO,F1)) %>% 
+  tidyr::drop_na() %>% 
+  ggplot(aes(x = name, y = value, color = group)) +
+  geom_jitter() +
+  theme_pubclean() +
+  scale_color_manual(values = c("F1" = "#FFC107", "DO" = "#1E88E5", "both" = "#D81B60")) +
+  ggtitle("Untreated - Top 5% Variable")
+
+var.lv_do.max %>% 
+  full_join(var.lv_f1.max) %>% 
+  dplyr::rename(DO = npcv.lv_do, F1 = npcv.lv_f1) %>% 
+  dplyr::select(ensembl_gene_id, symbol, DO, F1) %>% 
+  dplyr::mutate(group = case_when(
+    is.na(DO) & !is.na(F1) ~ "F1",
+    !is.na(DO) & is.na(F1) ~ "DO",
+    !is.na(DO) & !is.na(F1) ~ "both")) %>% 
+  dplyr::select(!F1) %>% 
+  tidyr::drop_na() %>% 
+  left_join(var.lv_f1 %>% select(ensembl_gene_id, symbol, npcv.lv_f1)) %>% 
+  dplyr::rename(F1 = npcv.lv_f1) %>% 
+  pivot_longer(cols = c(DO,F1)) %>% 
+  ggplot(aes(x = name, y = value, color = group)) +
+  geom_line(aes(group = ensembl_gene_id), alpha = 0.3) +
+  geom_jitter() +
+  ylim(0, NA) + 
+  theme_pubclean() +
+  scale_color_manual(values = c("F1" = "#FFC107", "DO" = "#1E88E5", "both" = "#D81B60")) +
+  ggtitle("Untreated - Top 5% Variable - DO Only")
+
+
+var.lv_do.max %>% 
+  full_join(var.lv_f1.max) %>% 
+  dplyr::rename(DO = npcv.lv_do, F1 = npcv.lv_f1) %>% 
+  dplyr::select(ensembl_gene_id, symbol, DO, F1) %>% 
+  dplyr::mutate(group = case_when(
+    is.na(DO) & !is.na(F1) ~ "F1",
+    !is.na(DO) & is.na(F1) ~ "DO",
+    !is.na(DO) & !is.na(F1) ~ "both")) %>% 
+  dplyr::select(!DO) %>% 
+  tidyr::drop_na() %>% 
+  left_join(var.lv_do %>% select(ensembl_gene_id, symbol, npcv.lv_do)) %>% 
+  dplyr::rename(DO = npcv.lv_do) %>% 
+  pivot_longer(cols = c(DO,F1)) %>% 
+  ggplot(aes(x = name, y = value, color = group)) +
+  geom_line(aes(group = ensembl_gene_id), alpha = 0.3) +
+  geom_jitter() +
+  ylim(0, NA) +
+  theme_pubclean() +
+  scale_color_manual(values = c("F1" = "#FFC107", "DO" = "#1E88E5", "both" = "#D81B60")) +
+  ggtitle("Untreated - Top 5% Variable - F1 Only")
+
+```
+
+:::
+
+### Overlapping Gene Comparison
+These are plots of the % CV (non-parametric) in transcript abundance for untreated mice DO vs F1.
+
+::: {.panel-tabset .nav-pills}
+
+#### Kidney
+```{r untreated_kd_overlap}
+#| cache: true
+#| message: false
+#| warning: false
+
+## CV DO vs F1 5%
+var.kd_do.max %>% inner_join(var.kd_f1.max) %>% 
+  ggplot(aes(x = npcv.kd_do, y = npcv.kd_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1")+
+  ggtitle(paste0("Top 5% most variable Genes - n=",
+                 top_5_overlap,"/", top_5_total))
+
+## 10%
+var.kd_do %>% 
+  slice_max(npcv.kd_do, prop = 0.1) %>% 
+  inner_join(var.kd_f1 %>% slice_max(npcv.kd_f1, prop = 0.1)) %>% 
+  ggplot(aes(x = npcv.kd_do, y = npcv.kd_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1")+
+  ggtitle(paste0("Top 10% most variable Genes - n=",
+                 top_10_overlap,"/", top_10_total))
+
+## 25%
+var.kd_do %>% 
+  slice_max(npcv.kd_do, prop = 0.25) %>% 
+  inner_join(var.kd_f1 %>% slice_max(npcv.kd_f1, prop = 0.25)) %>% 
+  ggplot(aes(x = npcv.kd_do, y = npcv.kd_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1")+
+  ggtitle(paste0("Top 25% most variable Genes - n=",
+                 top_25_overlap,"/", top_25_total))
+
+## 50%
+var.kd_do %>% 
+  slice_max(npcv.kd_do, prop = 0.5) %>% 
+  inner_join(var.kd_f1 %>% slice_max(npcv.kd_f1, prop = 0.5)) %>% 
+  ggplot(aes(x = npcv.kd_do, y = npcv.kd_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1")+
+  ggtitle(paste0("Top 50% most variable Genes - n=",
+                 top_50_overlap,"/", top_50_total))
+```
+
+#### Liver
+```{r untreated_lv_overlap}
+#| cache: true
+#| message: false
+#| warning: false
+
+## CV DO vs F1 5%
+var.lv_do.max %>% inner_join(var.lv_f1.max) %>% 
+  ggplot(aes(x = npcv.lv_do, y = npcv.lv_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1")+
+  ggtitle(paste0("Top 5% most variable Genes - n=",
+                 top_5_overlap,"/", top_5_total))
+
+## 10%
+var.lv_do %>% 
+  slice_max(npcv.lv_do, prop = 0.1) %>% 
+  inner_join(var.lv_f1 %>% slice_max(npcv.lv_f1, prop = 0.1)) %>% 
+  ggplot(aes(x = npcv.lv_do, y = npcv.lv_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1")+
+  ggtitle(paste0("Top 10% most variable Genes - n=",
+                 top_10_overlap,"/", top_10_total))
+
+## 25%
+var.lv_do %>% 
+  slice_max(npcv.lv_do, prop = 0.25) %>% 
+  inner_join(var.lv_f1 %>% slice_max(npcv.lv_f1, prop = 0.25)) %>% 
+  ggplot(aes(x = npcv.lv_do, y = npcv.lv_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1")+
+  ggtitle(paste0("Top 25% most variable Genes - n=",
+                 top_25_overlap,"/", top_25_total))
+
+## 50%
+var.lv_do %>% 
+  slice_max(npcv.lv_do, prop = 0.5) %>% 
+  inner_join(var.lv_f1 %>% slice_max(npcv.lv_f1, prop = 0.5)) %>% 
+  ggplot(aes(x = npcv.lv_do, y = npcv.lv_f1)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  geom_smooth(method = "lm") +
+  stat_cor() +
+  theme_pubclean(base_size = 14) +
+  scale_x_log10() +
+  scale_y_log10() +
+  xlab("DO") +
+  ylab("F1")+
+  ggtitle(paste0("Top 50% most variable Genes - n=",
+                 top_50_overlap,"/", top_50_total))
+```
+
+:::
+
+:::
+
+## By Dose CV
+
+```{r dose_wise_cv}
+#| warning: false
+#| message: false
+
+## Add tabs for %CV analysis for each dose
+## Variance decomposition?
+## Calculate variance for each dose and look for overlaps of variability between doses
+## Calculate variance for each dose/strain and take the difference between DO and F1 and compare at each dose
+## Switch sd to median absolute deviation
+
+## Dose 0
+## Put samples into transposed format, with samples as rows and genes as columns. Select for each strain/tissue combination.
+kd_do_samp_by_gene <- norm_filt_counts_kd %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="DO" & sample_table$tissue=="kidney" & sample_table$dose==0)]) %>%
+  t()
+
+lv_do_samp_by_gene <- norm_filt_counts_lv %>%
+  dplyr::select(sample_table$ID[which(sample_table$strain=="DO" & sample_table$tissue=="liver" & sample_table$dose==0)]) %>%
+  t()
+
+kd_f1_samp_by_gene <- norm_filt_counts_kd %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="B6C3F1/J" & sample_table$tissue=="kidney" & sample_table$dose==0)]) %>% 
+  t()
+
+lv_f1_samp_by_gene <- norm_filt_counts_lv %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="B6C3F1/J" & sample_table$tissue=="liver" & sample_table$dose==0)]) %>% 
+  t()
+
+## Calculate the stats
+## Variance
+var.kd_do <- kd_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.lv_do <- lv_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.kd_f1 <- kd_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.lv_f1 <- lv_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+## Mean
+mean.kd_do <- kd_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_do <- lv_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.kd_f1 <- kd_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_f1 <- lv_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+## Median Absolute Deviation
+mad.kd_do <- kd_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.lv_do <- lv_do_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.kd_f1 <- kd_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.lv_f1 <- lv_f1_samp_by_gene %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+## Put everything together for each strain/tissue combo
+var.kd_do <- inner_join(var.kd_do, mean.kd_do) %>% 
+  inner_join(., n.kd_do) %>% 
+  inner_join(., mad.kd_do) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.kd_do = 100*sd/mean) %>%
+  dplyr::mutate(npcv.kd_do = 100*mad/abs(mean)) %>% 
+  rename(mean.kd_do = mean, sd.kd_do = sd, n.kd_do = n, var.kd_do = var, mad.kd_do = mad)
+
+var.lv_do <- inner_join(var.lv_do, mean.lv_do) %>% 
+  inner_join(., n.lv_do) %>% 
+  inner_join(., mad.lv_do) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.lv_do = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.lv_do = 100*mad/abs(mean)) %>%
+  rename(mean.lv_do = mean, sd.lv_do = sd, n.lv_do = n, var.lv_do = var, mad.lv_do = mad)
+
+var.kd_f1 <- inner_join(var.kd_f1, mean.kd_f1) %>% 
+  inner_join(., n.kd_f1) %>% 
+  inner_join(., mad.kd_f1) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.kd_f1 = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.kd_f1 = 100*mad/abs(mean)) %>%
+  rename(mean.kd_f1 = mean, sd.kd_f1 = sd, n.kd_f1 = n, var.kd_f1 = var, mad.kd_f1 = mad)
+
+var.lv_f1 <- inner_join(var.lv_f1, mean.lv_f1) %>% 
+  inner_join(., n.lv_f1) %>% 
+  inner_join(., mad.lv_f1) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.lv_f1 = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.lv_f1 = 100*mad/abs(mean)) %>%
+  rename(mean.lv_f1 = mean, sd.lv_f1 = sd, n.lv_f1 = n, var.lv_f1 = var, mad.lv_f1 = mad)
+
+## Dose 1
+## Put samples into transposed format, with samples as rows and genes as columns. Select for each strain/tissue combination.
+kd_do_samp_by_gene_1 <- norm_filt_counts_kd %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="DO" & sample_table$tissue=="kidney" & sample_table$dose==1)]) %>%
+  t()
+
+lv_do_samp_by_gene_1 <- norm_filt_counts_lv %>%
+  dplyr::select(sample_table$ID[which(sample_table$strain=="DO" & sample_table$tissue=="liver" & sample_table$dose==1)]) %>%
+  t()
+
+kd_f1_samp_by_gene_1 <- norm_filt_counts_kd %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="B6C3F1/J" & sample_table$tissue=="kidney" & sample_table$dose==1)]) %>% 
+  t()
+
+lv_f1_samp_by_gene_1 <- norm_filt_counts_lv %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="B6C3F1/J" & sample_table$tissue=="liver" & sample_table$dose==1)]) %>% 
+  t()
+
+## Calculate the stats
+## Variance
+var.kd_do_1 <- kd_do_samp_by_gene_1 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.lv_do_1 <- lv_do_samp_by_gene_1 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.kd_f1_1 <- kd_f1_samp_by_gene_1 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.lv_f1_1 <- lv_f1_samp_by_gene_1 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+## Mean
+mean.kd_do_1 <- kd_do_samp_by_gene_1 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_do_1 <- lv_do_samp_by_gene_1 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.kd_f1_1 <- kd_f1_samp_by_gene_1 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_f1_1 <- lv_f1_samp_by_gene_1 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+## Median Absolute Deviation
+mad.kd_do_1 <- kd_do_samp_by_gene_1 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.lv_do_1 <- lv_do_samp_by_gene_1 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.kd_f1_1 <- kd_f1_samp_by_gene_1 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.lv_f1_1 <- lv_f1_samp_by_gene_1 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+## Put everything together for each strain/tissue combo
+var.kd_do_1 <- inner_join(var.kd_do_1, mean.kd_do_1) %>% 
+  inner_join(., mad.kd_do_1) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.kd_do = 100*sd/mean) %>%
+  dplyr::mutate(npcv.kd_do = 100*mad/abs(mean)) %>% 
+  rename(mean.kd_do = mean, sd.kd_do = sd, var.kd_do = var, mad.kd_do = mad)
+
+var.lv_do_1 <- inner_join(var.lv_do_1, mean.lv_do_1) %>% 
+  inner_join(., mad.lv_do_1) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.lv_do = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.lv_do = 100*mad/abs(mean)) %>%
+  rename(mean.lv_do = mean, sd.lv_do = sd, var.lv_do = var, mad.lv_do = mad)
+
+var.kd_f1_1 <- inner_join(var.kd_f1_1, mean.kd_f1_1) %>% 
+  inner_join(., mad.kd_f1_1) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.kd_f1 = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.kd_f1 = 100*mad/abs(mean)) %>%
+  rename(mean.kd_f1 = mean, sd.kd_f1 = sd, var.kd_f1 = var, mad.kd_f1 = mad)
+
+var.lv_f1_1 <- inner_join(var.lv_f1_1, mean.lv_f1_1) %>%
+  inner_join(., mad.lv_f1_1) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.lv_f1 = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.lv_f1 = 100*mad/abs(mean)) %>%
+  rename(mean.lv_f1 = mean, sd.lv_f1 = sd, var.lv_f1 = var, mad.lv_f1 = mad)
+
+## Dose 10
+## Put samples into transposed format, with samples as rows and genes as columns. Select for each strain/tissue combination.
+kd_do_samp_by_gene_10 <- norm_filt_counts_kd %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="DO" & sample_table$tissue=="kidney" & sample_table$dose==10)]) %>%
+  t()
+
+lv_do_samp_by_gene_10 <- norm_filt_counts_lv %>%
+  dplyr::select(sample_table$ID[which(sample_table$strain=="DO" & sample_table$tissue=="liver" & sample_table$dose==10)]) %>%
+  t()
+
+kd_f1_samp_by_gene_10 <- norm_filt_counts_kd %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="B6C3F1/J" & sample_table$tissue=="kidney" & sample_table$dose==10)]) %>% 
+  t()
+
+lv_f1_samp_by_gene_10 <- norm_filt_counts_lv %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="B6C3F1/J" & sample_table$tissue=="liver" & sample_table$dose==10)]) %>% 
+  t()
+
+## Calculate the stats
+## Variance
+var.kd_do_10 <- kd_do_samp_by_gene_10 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.lv_do_10 <- lv_do_samp_by_gene_10 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.kd_f1_10 <- kd_f1_samp_by_gene_10 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.lv_f1_10 <- lv_f1_samp_by_gene_10 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+## Mean
+mean.kd_do_10 <- kd_do_samp_by_gene_10 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_do_10 <- lv_do_samp_by_gene_10 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.kd_f1_10 <- kd_f1_samp_by_gene_10 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_f1_10 <- lv_f1_samp_by_gene_10 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+## Median Absolute Deviation
+mad.kd_do_10 <- kd_do_samp_by_gene_10 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.lv_do_10 <- lv_do_samp_by_gene_10 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.kd_f1_10 <- kd_f1_samp_by_gene_10 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.lv_f1_10 <- lv_f1_samp_by_gene_10 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+## Put everything together for each strain/tissue combo
+var.kd_do_10 <- inner_join(var.kd_do_10, mean.kd_do_10) %>%
+  inner_join(., mad.kd_do_10) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.kd_do = 100*sd/mean) %>%
+  dplyr::mutate(npcv.kd_do = 100*mad/abs(mean)) %>% 
+  rename(mean.kd_do = mean, sd.kd_do = sd, var.kd_do = var, mad.kd_do = mad)
+
+var.lv_do_10 <- inner_join(var.lv_do_10, mean.lv_do_10) %>%  
+  inner_join(., mad.lv_do_10) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.lv_do = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.lv_do = 100*mad/abs(mean)) %>%
+  rename(mean.lv_do = mean, sd.lv_do = sd, var.lv_do = var, mad.lv_do = mad)
+
+var.kd_f1_10 <- inner_join(var.kd_f1_10, mean.kd_f1_10) %>% 
+  inner_join(., mad.kd_f1_10) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.kd_f1 = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.kd_f1 = 100*mad/abs(mean)) %>%
+  rename(mean.kd_f1 = mean, sd.kd_f1 = sd, var.kd_f1 = var, mad.kd_f1 = mad)
+
+var.lv_f1_10 <- inner_join(var.lv_f1_10, mean.lv_f1_10) %>% 
+  inner_join(., mad.lv_f1_10) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.lv_f1 = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.lv_f1 = 100*mad/abs(mean)) %>%
+  rename(mean.lv_f1 = mean, sd.lv_f1 = sd, var.lv_f1 = var, mad.lv_f1 = mad)
+
+## Dose 100
+## Put samples into transposed format, with samples as rows and genes as columns. Select for each strain/tissue combination.
+kd_do_samp_by_gene_100 <- norm_filt_counts_kd %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="DO" & sample_table$tissue=="kidney" & sample_table$dose==100)]) %>%
+  t()
+
+lv_do_samp_by_gene_100 <- norm_filt_counts_lv %>%
+  dplyr::select(sample_table$ID[which(sample_table$strain=="DO" & sample_table$tissue=="liver" & sample_table$dose==100)]) %>%
+  t()
+
+kd_f1_samp_by_gene_100 <- norm_filt_counts_kd %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="B6C3F1/J" & sample_table$tissue=="kidney" & sample_table$dose==100)]) %>% 
+  t()
+
+lv_f1_samp_by_gene_100 <- norm_filt_counts_lv %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="B6C3F1/J" & sample_table$tissue=="liver" & sample_table$dose==100)]) %>% 
+  t()
+
+## Calculate the stats
+## Variance
+var.kd_do_100 <- kd_do_samp_by_gene_100 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.lv_do_100 <- lv_do_samp_by_gene_100 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.kd_f1_100 <- kd_f1_samp_by_gene_100 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.lv_f1_100 <- lv_f1_samp_by_gene_100 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+## Mean
+mean.kd_do_100 <- kd_do_samp_by_gene_100 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_do_100 <- lv_do_samp_by_gene_100 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.kd_f1_100 <- kd_f1_samp_by_gene_100 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_f1_100 <- lv_f1_samp_by_gene_100 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+## Median Absolute Deviation
+mad.kd_do_100 <- kd_do_samp_by_gene_100 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.lv_do_100 <- lv_do_samp_by_gene_100 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.kd_f1_100 <- kd_f1_samp_by_gene_100 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.lv_f1_100 <- lv_f1_samp_by_gene_100 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+## Put everything together for each strain/tissue combo
+var.kd_do_100 <- inner_join(var.kd_do_100, mean.kd_do_100) %>% 
+  inner_join(., mad.kd_do_100) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.kd_do = 100*sd/mean) %>%
+  dplyr::mutate(npcv.kd_do = 100*mad/abs(mean)) %>% 
+  rename(mean.kd_do = mean, sd.kd_do = sd, var.kd_do = var, mad.kd_do = mad)
+
+var.lv_do_100 <- inner_join(var.lv_do_100, mean.lv_do_100) %>%
+  inner_join(., mad.lv_do_100) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.lv_do = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.lv_do = 100*mad/abs(mean)) %>%
+  rename(mean.lv_do = mean, sd.lv_do = sd, var.lv_do = var, mad.lv_do = mad)
+
+var.kd_f1_100 <- inner_join(var.kd_f1_100, mean.kd_f1_100) %>% 
+  inner_join(., mad.kd_f1_100) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.kd_f1 = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.kd_f1 = 100*mad/abs(mean)) %>%
+  rename(mean.kd_f1 = mean, sd.kd_f1 = sd, var.kd_f1 = var, mad.kd_f1 = mad)
+
+var.lv_f1_100 <- inner_join(var.lv_f1_100, mean.lv_f1_100) %>% 
+  inner_join(., mad.lv_f1_100) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.lv_f1 = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.lv_f1 = 100*mad/abs(mean)) %>%
+  rename(mean.lv_f1 = mean, sd.lv_f1 = sd, var.lv_f1 = var, mad.lv_f1 = mad)
+
+## Dose 500
+## Put samples into transposed format, with samples as rows and genes as columns. Select for each strain/tissue combination.
+kd_do_samp_by_gene_500 <- norm_filt_counts_kd %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="DO" & sample_table$tissue=="kidney" & sample_table$dose==500)]) %>%
+  t()
+
+lv_do_samp_by_gene_500 <- norm_filt_counts_lv %>%
+  dplyr::select(sample_table$ID[which(sample_table$strain=="DO" & sample_table$tissue=="liver" & sample_table$dose==500)]) %>%
+  t()
+
+kd_f1_samp_by_gene_500 <- norm_filt_counts_kd %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="B6C3F1/J" & sample_table$tissue=="kidney" & sample_table$dose==500)]) %>% 
+  t()
+
+lv_f1_samp_by_gene_500 <- norm_filt_counts_lv %>% 
+  dplyr::select(sample_table$ID[which(sample_table$strain=="B6C3F1/J" & sample_table$tissue=="liver" & sample_table$dose==500)]) %>% 
+  t()
+
+## Calculate the stats
+## Variance
+var.kd_do_500 <- kd_do_samp_by_gene_500 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.lv_do_500 <- lv_do_samp_by_gene_500 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.kd_f1_500 <- kd_f1_samp_by_gene_500 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+var.lv_f1_500 <- lv_f1_samp_by_gene_500 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ var(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, var = V1) %>% 
+  arrange(desc(var))
+
+## Mean
+mean.kd_do_500 <- kd_do_samp_by_gene_500 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_do_500 <- lv_do_samp_by_gene_500 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.kd_f1_500 <- kd_f1_samp_by_gene_500 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+mean.lv_f1_500 <- lv_f1_samp_by_gene_500 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mean(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  dplyr::rename(ensembl_gene_id = rowname, mean = V1) %>% 
+  arrange(desc(mean))
+
+## Median Absolute Deviation
+mad.kd_do_500 <- kd_do_samp_by_gene_500 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.lv_do_500 <- lv_do_samp_by_gene_500 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.kd_f1_500 <- kd_f1_samp_by_gene_500 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+mad.lv_f1_500 <- lv_f1_samp_by_gene_500 %>% 
+  as_tibble() %>% 
+  summarise_all(list( ~ mad(., na.rm = T))) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(ensembl_gene_id = rowname, mad = V1) %>% 
+  arrange(desc(mad))
+
+## Put everything together for each strain/tissue combo
+var.kd_do_500 <- inner_join(var.kd_do_500, mean.kd_do_500) %>% 
+  inner_join(., mad.kd_do_500) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.kd_do = 100*sd/mean) %>%
+  dplyr::mutate(npcv.kd_do = 100*mad/abs(mean)) %>% 
+  rename(mean.kd_do = mean, sd.kd_do = sd, var.kd_do = var, mad.kd_do = mad)
+
+var.lv_do_500 <- inner_join(var.lv_do_500, mean.lv_do_500) %>% 
+  inner_join(., mad.lv_do_500) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.lv_do = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.lv_do = 100*mad/abs(mean)) %>%
+  rename(mean.lv_do = mean, sd.lv_do = sd, var.lv_do = var, mad.lv_do = mad)
+
+var.kd_f1_500 <- inner_join(var.kd_f1_500, mean.kd_f1_500) %>% 
+  inner_join(., mad.kd_f1_500) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.kd_f1 = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.kd_f1 = 100*mad/abs(mean)) %>%
+  rename(mean.kd_f1 = mean, sd.kd_f1 = sd, var.kd_f1 = var, mad.kd_f1 = mad)
+
+var.lv_f1_500 <- inner_join(var.lv_f1_500, mean.lv_f1_500) %>% 
+  inner_join(., mad.lv_f1_500) %>% 
+  left_join(. , biomart_105 %>% dplyr::select(gene, chromosome, symbol), by = join_by(ensembl_gene_id == gene)) %>% 
+  dplyr::mutate(sd = sqrt(var)) %>% 
+  dplyr::mutate(cv.lv_f1 = 100*sd/mean) %>% 
+  dplyr::mutate(npcv.lv_f1 = 100*mad/abs(mean)) %>%
+  rename(mean.lv_f1 = mean, sd.lv_f1 = sd, var.lv_f1 = var, mad.lv_f1 = mad)
+```
+
+## PC4 Analysis
+
+```{r pc4}
+#| cache: true
+#| message: false
+#| warning: false
+
+pca_norm_filt_kd <- prcomp(t(log1p(norm_filt_counts_kd[,sample_table$ID, drop=F])), center=T, scale=F)
+pca_norm_filt_lv <- prcomp(t(log1p(norm_filt_counts_lv[,sample_table$ID, drop=F])), center=T, scale=F)
+
+## Plot the PCs to check that the the PCs still match up - omitting batch coloring since we have shown there is no batch effect
+pca_norm_filt_kd_df <- as_tibble(pca_norm_filt_kd$x, rownames="ID") %>%
+  left_join(sample_table)
+var_norm_filt_kd_explained <- (pca_norm_filt_kd$sdev^2/sum(pca_norm_filt_kd$sdev^2))
+
+pca_norm_filt_lv_df <- as_tibble(pca_norm_filt_lv$x, rownames="ID") %>%
+  left_join(sample_table)
+var_norm_filt_lv_explained <- (pca_norm_filt_lv$sdev^2/sum(pca_norm_filt_lv$sdev^2))
+
+pca_norm_filt_kd_df$dose <- factor(pca_norm_filt_kd_df$dose, levels = c(0,1,10,100,500))
+pca_norm_filt_lv_df$dose <- factor(pca_norm_filt_lv_df$dose, levels = c(0,1,10,100,500))
+
+## Set alternate treatment groups
+pca_norm_filt_kd_df <- pca_norm_filt_kd_df %>% 
+  dplyr::mutate(treat1 = ifelse(dose == 0, "untreated", "treated"),
+                treat2 = case_when(
+                  dose == 0 ~ "low",
+                  dose == 1 ~ "low",
+                  dose == 10 ~ "low",
+                  dose == 100 ~ "high",
+                  dose == 500 ~ "high"),
+                treat3 = case_when(
+                  dose == 0 ~ "low",
+                  dose == 1 ~ "low",
+                  dose == 10 ~ "high",
+                  dose == 100 ~ "high",
+                  dose == 500 ~ "high"
+                ))
+
+pca_norm_filt_lv_df <- pca_norm_filt_lv_df %>% 
+  dplyr::mutate(treat1 = ifelse(dose == 0, "untreated", "treated"),
+                treat2 = case_when(
+                  dose == 0 ~ "low",
+                  dose == 1 ~ "low",
+                  dose == 10 ~ "low",
+                  dose == 100 ~ "high",
+                  dose == 500 ~ "high"),
+                treat3 = case_when(
+                  dose == 0 ~ "low",
+                  dose == 1 ~ "low",
+                  dose == 10 ~ "high",
+                  dose == 100 ~ "high",
+                  dose == 500 ~ "high"
+                ))
+
+treat1_colors <- c("treated" = "purple3", "untreated" = "green3")
+treat2_colors <- c("high" = "purple3", "low" = "green3")
+
+```
+
+::: {.panel-tabset .nav-pills}
+
+### PC Treatment Comparisons
+
+::: {.panel-tabset .nav-pills}
+
+#### Kidney
+```{r pc4_kd}
+#| cache: true
+#| message: false
+#| warning: false
+
+pca_norm_filt_kd_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=treat1),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  scale_color_manual(values = treat1_colors) +
+  scale_fill_manual(values = treat1_colors) +
+  theme(legend.position = "right") +
+  ggtitle("All PCs - Treated vs Untreated")
+
+pca_norm_filt_kd_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=treat2),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  scale_color_manual(values = treat2_colors) +
+  scale_fill_manual(values = treat2_colors) +
+  theme(legend.position = "right") +
+  ggtitle("All PCs - 0/1/10 vs 100/500")
+
+pca_norm_filt_kd_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=treat3),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  scale_color_manual(values = treat2_colors) +
+  scale_fill_manual(values = treat2_colors) +
+  theme(legend.position = "right") +
+  ggtitle("All PCs - 0/1 vs 10/100/500")
+
+```
+
+#### Liver
+```{r pc4_lv}
+#| cache: true
+#| message: false
+#| warning: false
+
+pca_norm_filt_lv_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=treat1),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  scale_color_manual(values = treat1_colors) +
+  scale_fill_manual(values = treat1_colors) +
+  theme(legend.position = "right") +
+  ggtitle("All PCs - Treated vs Untreated")
+
+pca_norm_filt_lv_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=treat2),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  scale_color_manual(values = treat2_colors) +
+  scale_fill_manual(values = treat2_colors) +
+  theme(legend.position = "right") +
+  ggtitle("All PCs - 0/1/10 vs 100/500")
+
+pca_norm_filt_lv_df %>%
+  ggpairs(., columns = 2:11, progress = F, ggplot2::aes(color=treat3),
+          upper = list(continuous = "density", combo = "box_no_facet"),
+          lower = list(continuous = "points", combo = "dot_no_facet")) +
+  theme_light(base_size = 14) +
+  scale_color_manual(values = treat2_colors) +
+  scale_fill_manual(values = treat2_colors) +
+  theme(legend.position = "right") +
+  ggtitle("All PCs - 0/1 vs 10/100/500")
+```
+
+:::
+
+### Other Known Covariates
+
+::: {.panel-tabset .nav-pills}
+
+#### Kidney
+```{r pc4_pc7_kd}
+#| cache: true
+#| message: false
+#| warning: false
+
+pca_norm_filt_kd_df %>%
+  ggplot(aes(x = PC4, y = PC1, color = sex)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = sex_colors) +
+  ggtitle("PC4 vs PC1 x Sex") +
+  theme_pubclean()
+  
+pca_norm_filt_kd_df %>%
+  ggplot(aes(x = PC7, y = PC1, color = strain)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = strain_colors) +
+  ggtitle("PC7 vs PC1 x Strain") +
+  theme_pubclean()
+
+```
+
+#### Liver
+```{r pc4_pc7_lv}
+#| cache: true
+#| message: false
+#| warning: false
+
+pca_norm_filt_lv_df %>%
+  ggplot(aes(x = PC4, y = PC1, color = sex)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = sex_colors) +
+  ggtitle("PC4 vs PC1 x Sex") +
+  theme_pubclean()
+  
+  pca_norm_filt_lv_df %>%
+  ggplot(aes(x = PC7, y = PC1, color = strain)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = strain_colors) +
+  ggtitle("PC7 vs PC1 x Strain") +
+  theme_pubclean()
+```
+
+:::
+
+:::
+
+:::
+
+# Question 2
+Which genes are changing in response to triphenyl phosphate at each dose? Are the genes changing at each dose similar or different between DO and F1 strains?
+
+::: {.panel-tabest .nav-pills}
+
+## ART-ANOVA Enrichment
+Enrichment for the ART-ANOVA results focusing on `strain`, `dose`, `strain:dose`, and `sex:strain:dose` as interaction terms. When strain and dose are interacting strain will be held consistent and only differences between doses will be considered.
+
+```{r art_anova}
+#| cache: true
+#| message: false
+#| warning: false
+
+kd_strain_sig <- kd_art_terms %>% dplyr::filter(term == "strain", p.adj.signif!="ns")
+lv_strain_sig <- lv_art_terms %>% dplyr::filter(term == "strain", p.adj.signif!="ns")
+
+kd_dose_sig <- kd_art_terms %>% dplyr::filter(term == "dose", p.adj.signif!="ns")
+lv_dose_sig <- lv_art_terms %>% dplyr::filter(term == "dose", p.adj.signif!="ns")
+
+kd_strain_dose_sig <- kd_art_terms %>% dplyr::filter(term=="strain:dose", p.adj.signif!="ns") %>% 
+  dplyr::mutate(strain1 = str_split_i(group1, ",", 1)) %>% 
+  dplyr::mutate(strain2 = str_split_i(group2, ",", 1)) %>% 
+  dplyr::mutate(dose1 = str_split_i(group1, ",", 2)) %>% 
+  dplyr::mutate(dose2 = str_split_i(group2, ",", 2)) %>% 
+  dplyr::filter(strain1 == strain2)
+lv_strain_dose_sig <- lv_art_terms %>% dplyr::filter(term=="strain:dose", p.adj.signif!="ns") %>% 
+  dplyr::mutate(strain1 = str_split_i(group1, ",", 1)) %>% 
+  dplyr::mutate(strain2 = str_split_i(group2, ",", 1)) %>% 
+  dplyr::mutate(dose1 = str_split_i(group1, ",", 2)) %>% 
+  dplyr::mutate(dose2 = str_split_i(group2, ",", 2)) %>% 
+  dplyr::filter(strain1 == strain2)
+
+kd_sex_strain_dose_sig <- kd_art_terms %>% dplyr::filter(term=="sex:strain:dose", p.adj.signif!="ns") %>% 
+  dplyr::mutate(sex1 = str_split_i(group1, ",", 1)) %>% 
+  dplyr::mutate(sex2 = str_split_i(group2, ",", 1)) %>%
+  dplyr::mutate(strain1 = str_split_i(group1, ",", 2)) %>% 
+  dplyr::mutate(strain2 = str_split_i(group2, ",", 2)) %>% 
+  dplyr::mutate(dose1 = str_split_i(group1, ",", 3)) %>% 
+  dplyr::mutate(dose2 = str_split_i(group2, ",", 3)) %>% 
+  dplyr::filter(sex1==sex2, strain1==strain2, dose1!=dose2)
+lv_sex_strain_dose_sig <- lv_art_terms %>% dplyr::filter(term=="sex:strain:dose", p.adj.signif!="ns") %>% 
+  dplyr::mutate(sex1 = str_split_i(group1, ",", 1)) %>% 
+  dplyr::mutate(sex2 = str_split_i(group2, ",", 1)) %>%
+  dplyr::mutate(strain1 = str_split_i(group1, ",", 2)) %>% 
+  dplyr::mutate(strain2 = str_split_i(group2, ",", 2)) %>% 
+  dplyr::mutate(dose1 = str_split_i(group1, ",", 3)) %>% 
+  dplyr::mutate(dose2 = str_split_i(group2, ",", 3)) %>% 
+  dplyr::filter(sex1==sex2, strain1==strain2, dose1!=dose2)
+
+kd_dose_strain_sig <- kd_art_terms %>% dplyr::filter(term=="strain:dose", p.adj.signif!="ns") %>% 
+  dplyr::mutate(strain1 = str_split_i(group1, ",", 1)) %>% 
+  dplyr::mutate(strain2 = str_split_i(group2, ",", 1)) %>% 
+  dplyr::mutate(dose1 = str_split_i(group1, ",", 2)) %>% 
+  dplyr::mutate(dose2 = str_split_i(group2, ",", 2)) %>% 
+  dplyr::filter(dose1 == dose2)
+lv_dose_strain_sig <- lv_art_terms %>% dplyr::filter(term=="strain:dose", p.adj.signif!="ns") %>% 
+  dplyr::mutate(strain1 = str_split_i(group1, ",", 1)) %>% 
+  dplyr::mutate(strain2 = str_split_i(group2, ",", 1)) %>% 
+  dplyr::mutate(dose1 = str_split_i(group1, ",", 2)) %>% 
+  dplyr::mutate(dose2 = str_split_i(group2, ",", 2)) %>% 
+  dplyr::filter(dose1 == dose2)
+
+kd_sex_dose_strain_sig <- kd_art_terms %>% dplyr::filter(term=="sex:strain:dose", p.adj.signif!="ns") %>% 
+  dplyr::mutate(sex1 = str_split_i(group1, ",", 1)) %>% 
+  dplyr::mutate(sex2 = str_split_i(group2, ",", 1)) %>%
+  dplyr::mutate(strain1 = str_split_i(group1, ",", 2)) %>% 
+  dplyr::mutate(strain2 = str_split_i(group2, ",", 2)) %>% 
+  dplyr::mutate(dose1 = str_split_i(group1, ",", 3)) %>% 
+  dplyr::mutate(dose2 = str_split_i(group2, ",", 3)) %>% 
+  dplyr::filter(sex1==sex2, strain1==strain2, dose1!=dose2)
+lv_sex_dose_strain_sig <- lv_art_terms %>% dplyr::filter(term=="sex:strain:dose", p.adj.signif!="ns") %>% 
+  dplyr::mutate(sex1 = str_split_i(group1, ",", 1)) %>% 
+  dplyr::mutate(sex2 = str_split_i(group2, ",", 1)) %>%
+  dplyr::mutate(strain1 = str_split_i(group1, ",", 2)) %>% 
+  dplyr::mutate(strain2 = str_split_i(group2, ",", 2)) %>% 
+  dplyr::mutate(dose1 = str_split_i(group1, ",", 3)) %>% 
+  dplyr::mutate(dose2 = str_split_i(group2, ",", 3)) %>% 
+  dplyr::filter(sex1==sex2, strain1==strain2, dose1!=dose2)
+```
+
+::: {.panel-tabset .nav-pills}
+
+### Overrepresentation
+
+::: {.panel-tabset .nav-pills}
+
+#### Kidney
+
+```{r strain_kd_over}
+#| message: false
+#| warning: false
+
+kd_genes <- unique(kd_filt_long$gene)
+biomart_kd <- biomart_105 %>% 
+  dplyr::filter(gene %in% kd_genes)
+
+## Get biomart genes
+kd_strain_genes <- biomart_105 %>% 
+  dplyr::filter(gene %in% kd_strain_sig$gene) %>% 
+  dplyr::select(gene, symbol)
+
+kd_dose_genes <- biomart_105 %>% 
+  dplyr::filter(gene %in% kd_dose_sig$gene) %>% 
+  dplyr::select(gene, symbol)
+
+kd_strain_dose_genes <- biomart_105 %>% 
+  dplyr::filter(gene %in% kd_strain_dose_sig$gene) %>% 
+  dplyr::select(gene, symbol)
+
+kd_dose_strain_genes <- biomart_105 %>% 
+  dplyr::filter(gene %in% kd_dose_strain_sig$gene) %>% 
+  dplyr::select(gene, symbol)
+
+kd_sex_strain_dose_genes <- biomart_105 %>% 
+  dplyr::filter(gene %in% kd_sex_strain_dose_sig$gene) %>% 
+  dplyr::select(gene, symbol)
+
+kd_sex_dose_strain_genes <- biomart_105 %>% 
+  dplyr::filter(gene %in% kd_sex_dose_strain_sig$gene) %>% 
+  dplyr::select(gene, symbol)
+
+## query gprofiler2
+
+strain.g.kd <- gost(
+  query = kd_strain_genes$gene,
+  organism = 'mmusculus',
+  domain_scope = "custom",
+  custom_bg = biomart_kd$gene,
+  evcodes = T
+)
+
+dose.g.kd <- gost(
+  query = kd_dose_genes$symbol,
+  organism = 'mmusuclus',
+  domain_scope = "custom",
+  custom_bg = biomart_kd$symbol,
+  evcodes = T
+)
+
+strain.dose.g.kd <- gost(
+  query = kd_strain_dose_genes$symbol,
+  organism = 'mmusuclus',
+  domain_scope = "custom",
+  custom_bg = biomart_kd$symbol,
+  evcodes = T
+)
+
+dose.strain.g.kd <- gost(
+  query = kd_dose_strain_genes$symbol,
+  organism = 'mmusuclus',
+  domain_scope = "custom",
+  custom_bg = biomart_kd$symbol,
+  evcodes = T
+)
+
+sex.strain.dose.g.kd <- gost(
+  query = kd_sex_strain_dose_genes$symbol,
+  organism = 'mmusuclus',
+  domain_scope = "custom",
+  custom_bg = biomart_kd$symbol,
+  evcodes = T
+)
+
+sex.dose.strain.g.kd <- gost(
+  query = kd_sex_dose_strain_genes$symbol,
+  organism = 'mmusuclus',
+  domain_scope = "custom",
+  custom_bg = biomart_kd$symbol,
+  evcodes = T
+)
+
+## Filter results
+
+strain.g.kd$result <- strain.g.kd$result %>% filter(term_size < 660)
+dose.g.kd$result <- dose.g.kd$result %>% filter(term_size < 660)
+strain.dose.g.kd$result <- strain.dose.g.kd$result %>% filter(term_size < 660)
+dose.strain.g.kd$result <- dose.strain.g.kd$result %>% filter(term_size < 660)
+sex.strain.dose.g.kd$result <- sex.strain.dose.g.kd$result %>% filter(term_size < 660)
+sex.dose.strain.g.kd$result <- sex.dose.strain.g.kd$result %>% filter(term_size < 660)
+
+## Organize into single data table
+
+strain.g.kd$result %>%
+  mutate(interaction = "strain") %>%
+  select(interaction, term_name, source, FDR = p_value, term_size, intersection_size, intersection) %>%
+  filter(FDR < 0.01) %>% 
+  rbind(
+    dose.g.kd$result %>% 
+    mutate( interaction = "dose") %>% 
+    select( interaction, term_name, source, FDR = p_value, term_size, intersection_size,intersection) %>% 
+    filter( FDR <0.01) 
+  ) %>%
+  rbind(
+    strain.dose.g.kd$result %>% 
+    mutate( interaction = "strain:dose") %>% 
+    select( interaction, term_name, source, FDR = p_value, term_size, intersection_size,intersection) %>% 
+    filter( FDR <0.01) 
+  ) %>%
+  rbind(
+    dose.strain.g.kd$result %>% 
+    mutate( interaction = "dose:strain") %>% 
+    select( interaction, term_name, source, FDR = p_value, term_size, intersection_size,intersection) %>% 
+    filter( FDR <0.01) 
+  ) %>%
+  rbind(
+    sex.strain.dose.g.kd$result %>% 
+    mutate( interaction = "sex:strain:dose") %>% 
+    select( interaction, term_name, source, FDR = p_value, term_size, intersection_size,intersection) %>% 
+    filter( FDR <0.01) 
+  ) %>%
+  rbind(
+    sex.dose.strain.g.kd$result %>% 
+    mutate( interaction = "sex:dose:strain") %>% 
+    select( interaction, term_name, source, FDR = p_value, term_size, intersection_size,intersection) %>% 
+    filter( FDR <0.01) 
+  ) %>%
+  mutate_if( is.numeric, formatC, digits =2) %>% 
+  create_dt()
+```
+
+#### Liver
+
+```{r strain_lv_over}
+#| message: false
+#| warning: false
+
+lv_genes <- unique(lv_filt_long$gene)
+biomart_lv <- biomart_105 %>% 
+  dplyr::filter(gene %in% lv_genes)
+
+## Get biomart genes
+lv_strain_genes <- biomart_105 %>% 
+  dplyr::filter(gene %in% lv_strain_sig$gene) %>% 
+  dplyr::select(gene, symbol)
+
+lv_dose_genes <- biomart_105 %>% 
+  dplyr::filter(gene %in% lv_dose_sig$gene) %>% 
+  dplyr::select(gene, symbol)
+
+lv_strain_dose_genes <- biomart_105 %>% 
+  dplyr::filter(gene %in% lv_strain_dose_sig$gene) %>% 
+  dplyr::select(gene, symbol)
+
+lv_dose_strain_genes <- biomart_105 %>% 
+  dplyr::filter(gene %in% lv_dose_strain_sig$gene) %>% 
+  dplyr::select(gene, symbol)
+
+lv_sex_strain_dose_genes <- biomart_105 %>% 
+  dplyr::filter(gene %in% lv_sex_strain_dose_sig$gene) %>% 
+  dplyr::select(gene, symbol)
+
+lv_sex_dose_strain_genes <- biomart_105 %>% 
+  dplyr::filter(gene %in% lv_sex_dose_strain_sig$gene) %>% 
+  dplyr::select(gene, symbol)
+
+## query gprofiler2
+
+strain.g.lv <- gost(
+  query = lv_strain_genes$symbol,
+  organism = 'mmusuclus',
+  domain_scope = "custom",
+  custom_bg = biomart_lv$symbol,
+  evcodes = T
+)
+
+dose.g.lv <- gost(
+  query = lv_dose_genes$symbol,
+  organism = 'mmusuclus',
+  domain_scope = "custom",
+  custom_bg = biomart_lv$symbol,
+  evcodes = T
+)
+
+strain.dose.g.lv <- gost(
+  query = lv_strain_dose_genes$symbol,
+  organism = 'mmusuclus',
+  domain_scope = "custom",
+  custom_bg = biomart_lv$symbol,
+  evcodes = T
+)
+
+dose.strain.g.lv <- gost(
+  query = lv_dose_strain_genes$symbol,
+  organism = 'mmusuclus',
+  domain_scope = "custom",
+  custom_bg = biomart_lv$symbol,
+  evcodes = T
+)
+
+sex.strain.dose.g.lv <- gost(
+  query = lv_sex_strain_dose_genes$symbol,
+  organism = 'mmusuclus',
+  domain_scope = "custom",
+  custom_bg = biomart_lv$symbol,
+  evcodes = T
+)
+
+sex.dose.strain.g.lv <- gost(
+  query = lv_sex_dose_strain_genes$symbol,
+  organism = 'mmusuclus',
+  domain_scope = "custom",
+  custom_bg = biomart_lv$symbol,
+  evcodes = T
+)
+
+## Filter results
+
+strain.g.lv$result <- strain.g.lv$result %>% filter(term_size < 660)
+dose.g.lv$result <- dose.g.lv$result %>% filter(term_size < 660)
+strain.dose.g.lv$result <- strain.dose.g.lv$result %>% filter(term_size < 660)
+dose.strain.g.lv$result <- dose.strain.g.lv$result %>% filter(term_size < 660)
+sex.strain.dose.g.lv$result <- sex.strain.dose.g.lv$result %>% filter(term_size < 660)
+sex.dose.strain.g.lv$result <- sex.dose.strain.g.lv$result %>% filter(term_size < 660)
+
+## Organize into single data table
+
+strain.g.lv$result %>%
+  mutate(interaction = "strain") %>%
+  select(interaction, term_name, source, FDR = p_value, term_size, intersection_size, intersection) %>%
+  filter(FDR < 0.01) %>% 
+  rbind(
+    dose.g.lv$result %>% 
+    mutate( interaction = "dose") %>% 
+    select( interaction, term_name, source, FDR = p_value, term_size, intersection_size,intersection) %>% 
+    filter( FDR <0.01) 
+  ) %>%
+  rbind(
+    strain.dose.g.lv$result %>% 
+    mutate( interaction = "strain:dose") %>% 
+    select( interaction, term_name, source, FDR = p_value, term_size, intersection_size,intersection) %>% 
+    filter( FDR <0.01) 
+  ) %>%
+  rbind(
+    dose.strain.g.lv$result %>% 
+    mutate( interaction = "dose:strain") %>% 
+    select( interaction, term_name, source, FDR = p_value, term_size, intersection_size,intersection) %>% 
+    filter( FDR <0.01) 
+  ) %>%
+  rbind(
+    sex.strain.dose.g.lv$result %>% 
+    mutate( interaction = "sex:strain:dose") %>% 
+    select( interaction, term_name, source, FDR = p_value, term_size, intersection_size,intersection) %>% 
+    filter( FDR <0.01) 
+  ) %>%
+  rbind(
+    sex.dose.strain.g.lv$result %>% 
+    mutate( interaction = "sex:dose:strain") %>% 
+    select( interaction, term_name, source, FDR = p_value, term_size, intersection_size,intersection) %>% 
+    filter( FDR <0.01) 
+  ) %>%
+  mutate_if( is.numeric, formatC, digits =2) %>% 
+  create_dt()
+```
+
+:::
+
+### Clustering
+
+```{r pull_dds}
+#| message: false
+#| warning: false
+
+kd_filt_dds <- readRDS("/projects/munger-lab/projects/DO_TPhP/data/kd_filt_dds.rds")
+lv_filt_dds <- readRDS("/projects/munger-lab/projects/DO_TPhP/data/lv_filt_dds.rds")
+
+names(kd_filt_dds) <- colsplit(string = names(kd_filt_dds), pattern = "_", names = c("gene", "symbol"))$gene
+names(lv_filt_dds) <- colsplit(string = names(lv_filt_dds), pattern = "_", names = c("gene", "symbol"))$gene
+
+```
+
+::: {.panel-tabset .nav-pills}
+
+#### Kidney
+
+strain
+```{r kd_strain_clustering}
+#| message: false
+#| warning: false
+
+# ma = assay(rlog(dds))[row.names(res)[1:100],]
+# res <- degPatterns(ma, design, time = "group")
+
+kd.strain.ma = assay(vst(kd_filt_dds))[rownames(results(kd_filt_dds)) %in% kd_strain_sig$gene,]
+kd.strain.res <- degPatterns(kd.strain.ma, sample_table , time = "dose", col= "strain", plot = FALSE)
+
+kd.strain.res$plot +
+  theme_pubclean() +
+  scale_color_manual(values = strain_colors)
+
+```
+
+dose
+```{r kd_dose_clustering}
+#| message: false
+#| warning: false
+
+# ma = assay(rlog(dds))[row.names(res)[1:100],]
+# res <- degPatterns(ma, design, time = "group")
+
+kd.dose.ma = assay(vst(kd_filt_dds))[rownames(results(kd_filt_dds)) %in% kd_dose_sig$gene,]
+kd.dose.res <- degPatterns(kd.dose.ma, sample_table , time = "dose", col= "strain", plot = FALSE)
+
+kd.dose.res$plot +
+  theme_pubclean() +
+  scale_color_manual(values = strain_colors)
+
+```
+
+strain:dose
+```{r kd_strain_dose_clustering}
+#| message: false
+#| warning: false
+
+# ma = assay(rlog(dds))[row.names(res)[1:100],]
+# res <- degPatterns(ma, design, time = "group")
+
+kd.strain_dose.ma = assay(vst(kd_filt_dds))[rownames(results(kd_filt_dds)) %in% kd_strain_dose_sig$gene,]
+kd.strain_dose.res <- degPatterns(kd.strain_dose.ma, sample_table , time = "dose", col= "strain", plot = FALSE)
+
+kd.strain_dose.res$plot +
+  theme_pubclean() +
+  scale_color_manual(values = strain_colors)
+
+```
+
+dose:strain
+```{r kd_dose_strain_clustering}
+#| message: false
+#| warning: false
+
+# ma = assay(rlog(dds))[row.names(res)[1:100],]
+# res <- degPatterns(ma, design, time = "group")
+
+kd.dose_strain.ma = assay(vst(kd_filt_dds))[rownames(results(kd_filt_dds)) %in% kd_dose_strain_sig$gene,]
+kd.dose_strain.res <- degPatterns(kd.dose_strain.ma, sample_table , time = "dose", col= "strain", plot = FALSE)
+
+kd.dose_strain.res$plot +
+  theme_pubclean() +
+  scale_color_manual(values = strain_colors)
+
+```
+
+sex:strain:dose
+```{r kd_sex_strain_dose_clustering}
+#| message: false
+#| warning: false
+
+# ma = assay(rlog(dds))[row.names(res)[1:100],]
+# res <- degPatterns(ma, design, time = "group")
+
+kd.sex_strain_dose.ma = assay(vst(kd_filt_dds))[rownames(results(kd_filt_dds)) %in% kd_sex_strain_dose_sig$gene,]
+kd.sex_strain_dose.res <- degPatterns(kd.sex_strain_dose.ma, sample_table , time = "dose", col= "strain", plot = FALSE)
+
+kd.sex_strain_dose.res$plot +
+  theme_pubclean() +
+  scale_color_manual(values = strain_colors)
+
+```
+
+sex:dose:strain
+```{r kd_sex_dose_strain_clustering}
+#| message: false
+#| warning: false
+
+# ma = assay(rlog(dds))[row.names(res)[1:100],]
+# res <- degPatterns(ma, design, time = "group")
+
+kd.sex_dose_strain.ma = assay(vst(kd_filt_dds))[rownames(results(kd_filt_dds)) %in% kd_sex_dose_strain_sig$gene,]
+kd.sex_dose_strain.res <- degPatterns(kd.sex_dose_strain.ma, sample_table , time = "dose", col= "strain", plot = FALSE)
+
+kd.sex_dose_strain.res$plot +
+  theme_pubclean() +
+  scale_color_manual(values = strain_colors)
+
+```
+
+#### Liver
+
+strain
+```{r lv_strain_clustering}
+#| message: false
+#| warning: false
+
+# ma = assay(rlog(dds))[row.names(res)[1:100],]
+# res <- degPatterns(ma, design, time = "group")
+
+lv.strain.ma = assay(vst(lv_filt_dds))[rownames(results(lv_filt_dds)) %in% lv_strain_sig$gene,]
+lv.strain.res <- degPatterns(lv.strain.ma, sample_table , time = "dose", col= "strain", plot = FALSE)
+
+lv.strain.res$plot +
+  theme_pubclean() +
+  scale_color_manual(values = strain_colors)
+
+```
+
+dose
+```{r lv_dose_clustering}
+#| message: false
+#| warning: false
+
+# ma = assay(rlog(dds))[row.names(res)[1:100],]
+# res <- degPatterns(ma, design, time = "group")
+
+lv.dose.ma = assay(vst(lv_filt_dds))[rownames(results(lv_filt_dds)) %in% lv_dose_sig$gene,]
+lv.dose.res <- degPatterns(lv.dose.ma, sample_table , time = "dose", col= "strain", plot = FALSE)
+
+lv.dose.res$plot +
+  theme_pubclean() +
+  scale_color_manual(values = strain_colors)
+
+```
+
+strain:dose
+```{r lv_strain_dose_clustering}
+#| message: false
+#| warning: false
+
+# ma = assay(rlog(dds))[row.names(res)[1:100],]
+# res <- degPatterns(ma, design, time = "group")
+
+lv.strain_dose.ma = assay(vst(lv_filt_dds))[rownames(results(lv_filt_dds)) %in% lv_strain_dose_sig$gene,]
+lv.strain_dose.res <- degPatterns(lv.strain_dose.ma, sample_table , time = "dose", col= "strain", plot = FALSE)
+
+lv.strain_dose.res$plot +
+  theme_pubclean() +
+  scale_color_manual(values = strain_colors)
+
+```
+
+dose:strain
+```{r lv_dose_strain_clustering}
+#| message: false
+#| warning: false
+
+# ma = assay(rlog(dds))[row.names(res)[1:100],]
+# res <- degPatterns(ma, design, time = "group")
+
+lv.dose_strain.ma = assay(vst(lv_filt_dds))[rownames(results(lv_filt_dds)) %in% lv_dose_strain_sig$gene,]
+lv.dose_strain.res <- degPatterns(lv.dose_strain.ma, sample_table , time = "dose", col= "strain", plot = FALSE)
+
+lv.dose_strain.res$plot +
+  theme_pubclean() +
+  scale_color_manual(values = strain_colors)
+
+```
+
+sex:strain:dose
+```{r lv_sex_strain_dose_clustering}
+#| message: false
+#| warning: false
+
+# ma = assay(rlog(dds))[row.names(res)[1:100],]
+# res <- degPatterns(ma, design, time = "group")
+
+lv.sex_strain_dose.ma = assay(vst(lv_filt_dds))[rownames(results(lv_filt_dds)) %in% lv_sex_strain_dose_sig$gene,]
+lv.sex_strain_dose.res <- degPatterns(lv.sex_strain_dose.ma, sample_table , time = "dose", col= "strain", plot = FALSE)
+
+lv.sex_strain_dose.res$plot +
+  theme_pubclean() +
+  scale_color_manual(values = strain_colors)
+
+```
+
+sex:dose:strain
+```{r lv_sex_dose_strain_clustering}
+#| message: false
+#| warning: false
+
+# ma = assay(rlog(dds))[row.names(res)[1:100],]
+# res <- degPatterns(ma, design, time = "group")
+
+lv.sex_dose_strain.ma = assay(vst(lv_filt_dds))[rownames(results(lv_filt_dds)) %in% lv_sex_dose_strain_sig$gene,]
+lv.sex_dose_strain.res <- degPatterns(lv.sex_dose_strain.ma, sample_table , time = "dose", col= "strain", plot = FALSE)
+
+lv.sex_dose_strain.res$plot +
+  theme_pubclean() +
+  scale_color_manual(values = strain_colors)
+
+```
+
+
+:::
+
+:::
+
+:::
